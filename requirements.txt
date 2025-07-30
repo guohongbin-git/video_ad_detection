@@ -1,0 +1,21 @@
+# Core ML and Vision
+torch
+torchvision
+torchaudio
+transformers
+opencv-python-headless
+numpy
+scikit-learn
+accelerate # Added for device_map="auto"
+
+# GUI Frameworks (choose one or more)
+pyqt5
+gradio
+streamlit
+
+# Reporting
+pandas
+reportlab
+
+# Testing
+pytest

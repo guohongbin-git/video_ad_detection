@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual Environment
+.venv/
+
+# IDE / Editor specific
+.idea/
+.vscode/
+*.swp
+
+# Local Data & Models (IMPORTANT)
+gemma-3-4b-it/
+paligemma2-3b-pt-224/
+video_ad_detector/database/
+video_ad_detector/reports/
+video_ad_detector/recorded_videos/
+video_ad_detector/materials/
+
+# Logs
+*.log
+streamlit.log
