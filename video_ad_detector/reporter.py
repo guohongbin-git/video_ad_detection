@@ -1,97 +1,110 @@
+
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
+from reportlab.lib import colors
 import os
-import cv2
-import time # Import time module
+import time
+
 from . import config
 
-def create_report(recorded_video_path: str, matched_ad: str, similarity: float):
+def generate_report(report_data: dict):
     """
-    Creates a PDF report with the ad detection results using ReportLab.
+    Creates a detailed PDF report with side-by-side comparison screenshots.
 
     Args:
-        recorded_video_path (str): Path to the recorded video.
-        matched_ad (str): Filename of the matched ad.
-        similarity (float): The similarity score.
+        report_data (dict): A dictionary containing all necessary data for the report.
     """
+    recorded_video_path = report_data["recorded_video_path"]
     report_filename = f"report_{os.path.basename(recorded_video_path)}.pdf"
     report_path = os.path.join(config.REPORTS_DIR, report_filename)
+    
     doc = SimpleDocTemplate(report_path, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
 
-    # Title
-    story.append(Paragraph("Ad Detection Report", styles['h1']))
+    # --- Title ---
+    story.append(Paragraph("Video Ad Detection Report", styles['h1']))
     story.append(Spacer(1, 0.2 * inch))
 
-    # Report Details
-    story.append(Paragraph(f"<b>Recorded Video:</b> {os.path.basename(recorded_video_path)}", styles['Normal']))
-    story.append(Paragraph(f"<b>Matched Ad:</b> {matched_ad}", styles['Normal']))
-    story.append(Paragraph(f"<b>Similarity Score:</b> {similarity:.2f}", styles['Normal']))
+    # --- Summary Section ---
+    story.append(Paragraph("<b>Summary of Findings</b>", styles['h2']))
+    story.append(Spacer(1, 0.1 * inch))
+
+    summary_text = f""
+    f"<b>- Recorded Video:</b> {os.path.basename(recorded_video_path)}<br/>"
+    f"<b>- Best Match Ad Material:</b> {report_data['best_match_material_filename']}<br/>"
+    f"<b>- Highest Similarity Score:</b> {report_data['overall_similarity_score']:.2f}<br/>"
+    f"<b>- Source Material Duration:</b> {report_data['material_duration']:.2f} seconds<br/>"
+    f"<b>- Total Matched Duration in Video:</b> {report_data['total_matched_duration_in_recorded']:.2f} seconds"
+    story.append(Paragraph(summary_text, styles['Normal']))
     story.append(Spacer(1, 0.2 * inch))
 
-    # Add screenshots
-    screenshots = take_screenshots(recorded_video_path)
-    if screenshots:
-        story.append(Paragraph("<b>Evidence Screenshots:</b>", styles['h2']))
-        story.append(Spacer(1, 0.1 * inch))
-        for i, screenshot_path in enumerate(screenshots):
+    # --- Comparison Evidence Section ---
+    story.append(Paragraph("<b>Comparative Evidence</b>", styles['h2']))
+    story.append(Spacer(1, 0.1 * inch))
+
+    screenshots = report_data.get("comparison_screenshots", [])
+    if not screenshots:
+        story.append(Paragraph("No comparison screenshots were generated.", styles['Normal']))
+    else:
+        # Create a table for side-by-side image comparison
+        table_data = [["Recorded Video Frame", "Original Material Frame"]]
+        
+        for item in screenshots:
             try:
-                img = Image(screenshot_path, width=3*inch, height=2*inch) # Adjust size as needed
-                story.append(img)
-                story.append(Spacer(1, 0.1 * inch))
+                # Create Image objects
+                img_recorded = Image(item["recorded_frame_path"], width=2.5*inch, height=1.5*inch, kind='proportional')
+                img_material = Image(item["material_frame_path"], width=2.5*inch, height=1.5*inch, kind='proportional')
+                
+                # Create timestamp paragraphs
+                ts_recorded = Paragraph(f"Time: {item['recorded_time']:.2f}s", styles['Normal'])
+                ts_material = Paragraph(f"Time: {item['material_time']:.2f}s", styles['Normal'])
+                
+                # Add images and timestamps to the table row
+                table_data.append([[img_recorded, ts_recorded], [img_material, ts_material]])
+
             except Exception as img_e:
-                print(f"Error adding image {screenshot_path} to PDF: {img_e}")
+                print(f"Error processing image for PDF: {img_e}")
+                # Add placeholder text if an image fails to load
+                table_data.append([f"Error loading image: {os.path.basename(item['recorded_frame_path'])}", 
+                                   f"Error loading image: {os.path.basename(item['material_frame_path'])}"])
 
-    doc.build(story)
-    print(f"Report generated at: {report_path}")
+        # Define table style
+        style = TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ])
 
-    # Clean up screenshot files after PDF is built
-    for screenshot_path in screenshots:
-        try:
-            os.remove(screenshot_path)
-        except OSError as e:
-            print(f"Error removing screenshot {screenshot_path}: {e}")
+        # Create and add the table to the story
+        comparison_table = Table(table_data, colWidths=[3.0 * inch, 3.0 * inch])
+        comparison_table.setStyle(style)
+        story.append(comparison_table)
 
-def take_screenshots(video_path: str):
-    """
-    Takes a few screenshots from the video.
+    # --- Build the PDF ---
+    try:
+        doc.build(story)
+        print(f"Successfully generated report at: {report_path}")
+    except Exception as e:
+        print(f"Error building PDF report: {e}")
 
-    Args:
-        video_path (str): The path to the video.
+    # --- Clean up screenshot files ---
+    all_screenshots_to_delete = []
+    for item in screenshots:
+        all_screenshots_to_delete.append(item["recorded_frame_path"])
+        all_screenshots_to_delete.append(item["material_frame_path"])
+    
+    for screenshot_path in set(all_screenshots_to_delete): # Use set to avoid deleting the same file twice
+        if screenshot_path and os.path.exists(screenshot_path):
+            try:
+                os.remove(screenshot_path)
+            except OSError as e:
+                print(f"Error removing screenshot file {screenshot_path}: {e}")
 
-    Returns:
-        list: A list of paths to the screenshot images.
-    """
-    cap = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total_frames == 0:
-        return []
-
-    screenshot_paths = []
-    os.makedirs(config.SCREENSHOTS_DIR, exist_ok=True)
-
-    # Clean up the video filename for safe use in paths
-    cleaned_video_filename = "".join(c for c in os.path.basename(video_path) if c.isalnum() or c in ('.', '_', '-')).replace(' ', '_')
-
-    for i in range(config.NUM_SCREENSHOTS):
-        frame_index = int(total_frames / (config.NUM_SCREENSHOTS + 1) * (i + 1))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-        ret, frame = cap.read()
-        if ret:
-            screenshot_path = os.path.join(config.SCREENSHOTS_DIR, f"screenshot_{cleaned_video_filename}_{i}.jpg")
-            cv2.imwrite(screenshot_path, frame)
-            # Verify file existence and size
-            if not os.path.exists(screenshot_path):
-                print(f"Error: Screenshot file not found after writing: {screenshot_path}")
-                continue
-            if os.path.getsize(screenshot_path) == 0:
-                print(f"Error: Screenshot file is empty after writing: {screenshot_path}")
-                continue
-            time.sleep(0.1) # Small delay to ensure file is fully written
-            screenshot_paths.append(screenshot_path)
-
-    cap.release()
-    return screenshot_paths

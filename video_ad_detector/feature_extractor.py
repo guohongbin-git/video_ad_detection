@@ -1,35 +1,48 @@
+
 import numpy as np
 from PIL import Image
-# Updated import to use Gemma3ForConditionalGeneration
+# Corrected import - Gemma3VisionEncoder is not a top-level import
 from transformers import AutoProcessor, Gemma3ForConditionalGeneration
 import torch
 import os
 os.environ["TRANSFORMERS_NO_TF"] = "1" # Disable TensorFlow import in transformers
 from . import config
 
-# --- Gemma 3 Feature Extractor ---
+# --- Model and Processor Initialization ---
 
-# Initialize model and processor
+# Declare variables in the global scope to hold the loaded models
+processor = None
+model = None
+vision_encoder = None
+
 try:
-    print(f"Loading model from: {config.GEMMA_MODEL_PATH}")
-    # When loading from a local path, local_files_only is not needed
+    print(f"Loading model components from: {config.GEMMA_MODEL_PATH}")
+    
     processor = AutoProcessor.from_pretrained(config.GEMMA_MODEL_PATH)
-    # Updated model class to Gemma3ForConditionalGeneration
+    
+    # Load the full multimodal model
     model = Gemma3ForConditionalGeneration.from_pretrained(
         config.GEMMA_MODEL_PATH,
-        torch_dtype=torch.bfloat16, # Use bfloat16 for better performance on supported hardware
-        device_map="auto" # Automatically map model to available devices (e.g., MPS)
+        torch_dtype=torch.bfloat16,
+        device_map="auto"
     )
-    print("Model loaded successfully.")
+    
+    # **Access the vision encoder as an attribute of the main model**
+    # This is the correct and robust way to get the vision encoder
+    if model:
+        vision_encoder = model.vision_encoder
+
+    print("Model and Vision Encoder loaded successfully.")
+
 except Exception as e:
-    print(f"Error loading model: {e}")
-    print("Please ensure that the model has been fully downloaded to the cache using 'hf download'.")
-    # Set model and processor to None so the app can still run (with errors)
-    processor, model = None, None
+    print(f"Error loading model components: {e}")
+    print("Please ensure the model is correctly downloaded and configured.")
+    # Ensure variables are reset on failure
+    processor, model, vision_encoder = None, None, None
 
 def extract_features(image: Image.Image) -> np.ndarray:
     """
-    Extracts features from a single image frame using the Gemma 3 model.
+    Extracts features from a single image frame using the model's Vision Encoder.
 
     Args:
         image (Image.Image): The input image.
@@ -37,57 +50,30 @@ def extract_features(image: Image.Image) -> np.ndarray:
     Returns:
         np.ndarray: The feature vector (embedding).
     """
-    if not model or not processor:
-        print("Model is not loaded. Cannot extract features.")
+    # Check if the essential components (processor and vision_encoder) are loaded
+    if not vision_encoder or not processor:
+        print("Vision Encoder or Processor is not loaded. Cannot extract features.")
         # Return a random vector to avoid crashing the app
-        return np.random.rand(1, 3072).astype(np.float32) # Gemma 3 base model has a hidden size of 3072
+        return np.random.rand(1, 3072).astype(np.float32)
 
     try:
-        # --- Corrected Chat Template for Gemma 3 ---
-        # Modern multimodal models require a structured chat format instead of a simple string prompt.
-        # We create a list of messages, including the special <image> token and the text prompt.
-        # The processor will then apply the correct chat template automatically.
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": "Describe the image."},
-                ],
-            }
-        ]
-        
-        # The processor's apply_chat_template method correctly formats the text part of the prompt.
-        prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = processor(prompt, images=image, return_tensors="pt").to(model.device)
+        # We only need to process the image to get pixel values for the vision encoder.
+        inputs = processor(images=image, return_tensors="pt").to(vision_encoder.device)
 
-        # Generate output, requesting hidden states to access embeddings
+        # Get the embeddings directly from the vision encoder
         with torch.no_grad():
-            outputs = model(**inputs, output_hidden_states=True)
+            outputs = vision_encoder(**inputs)
         
-        # --- Updated Feature Extraction Logic for Gemma 3 ---
-        # For Gemma 3, the vision embeddings are typically found in `vision_hidden_states`.
-        # We will take the last layer's hidden states and average them.
+        # The vision encoder output contains the `last_hidden_state` which holds the patch embeddings.
+        # Shape: (batch_size, num_patches, hidden_size)
+        last_hidden_state = outputs.last_hidden_state
         
-        image_features = None
-        if hasattr(outputs, 'vision_hidden_states') and outputs.vision_hidden_states is not None:
-            # This is the most reliable source for image features.
-            # It's a tuple of hidden states for each layer of the vision tower.
-            image_features = outputs.vision_hidden_states[-1] # Get the last layer's output
-            print("Found vision_hidden_states.")
-        elif hasattr(outputs, 'encoder_hidden_states') and outputs.encoder_hidden_states is not None:
-            # Fallback for models with a more generic encoder-decoder structure
-            image_features = outputs.encoder_hidden_states[-1]
-            print("Found encoder_hidden_states as a fallback.")
-        
-        if image_features is None:
-            print("Error: Could not find suitable vision hidden states for feature extraction.")
-            return np.random.rand(1, 3072).astype(np.float32)
+        # To get a single feature vector for the entire image (global feature), 
+        # we average the embeddings of all patches.
+        embedding = torch.mean(last_hidden_state, dim=1).cpu().numpy()
 
-        # Average the embeddings across all patches (sequence dimension) to get a single vector for the image.
-        embedding = torch.mean(image_features, dim=1).cpu().numpy()
-
-        print(f"Successfully extracted features from image. Embedding shape: {embedding.shape}")
+        # This print can be noisy, so it's commented out for now.
+        # print(f"Successfully extracted features. Embedding shape: {embedding.shape}")
         return embedding.astype(np.float32)
 
     except Exception as e:
