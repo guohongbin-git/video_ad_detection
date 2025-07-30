@@ -4,6 +4,7 @@ from PIL import Image
 import numpy as np
 from video_ad_detector import config
 from video_ad_detector import feature_extractor
+from . import database
 
 def get_video_duration(video_path: str) -> float:
     """
@@ -80,41 +81,57 @@ def extract_frame_at_time(video_path: str, time_in_seconds: float, output_path: 
         print(f"An error occurred during frame extraction from {video_path}: {e}")
         return None
 
-def process_material_video(video_path: str):
+def process_material_video(video_path: str, progress_callback=None):
     """
-    Processes a material video to extract keyframes and their features.
-
-    Args:
-        video_path (str): The path to the material video.
-
-    Returns:
-        np.ndarray: The aggregated feature vector for the video.
+    Processes a material video to extract, and SAVE, features for each sampled frame.
     """
     cap = cv2.VideoCapture(video_path)
-    features_list = []
+    if not cap.isOpened():
+        print(f"Error: Could not open video {video_path}")
+        return False
+
+    video_filename = os.path.basename(video_path)
+    features_to_save = []
     frame_count = 0
+    processed_frames_count = 0
     fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_interval = max(1, int(fps))  # Sample one frame per second
+
+    num_frames_to_process = len(range(0, total_frames, frame_interval))
+    if num_frames_to_process == 0:
+        print(f"Warning: No frames to process for {video_filename}")
+        cap.release()
+        return False
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        if frame_count % (int(fps) * config.KEYFRAME_EXTRACTION_INTERVAL) == 0:
+        if frame_count % frame_interval == 0:
+            processed_frames_count += 1
             image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             features = feature_extractor.extract_features(image)
-            features_list.append(features)
-        
+            current_time_sec = frame_count / fps
+            features_to_save.append((current_time_sec, features))
+
+            if progress_callback:
+                progress = processed_frames_count / num_frames_to_process
+                progress_callback(progress, f"Processing sampled frame {processed_frames_count}/{num_frames_to_process}")
+
         frame_count += 1
 
     cap.release()
 
-    if not features_list:
-        return None
+    if not features_to_save:
+        print(f"Error: No features were extracted from {video_filename}")
+        return False
 
-    # Aggregate features (e.g., by averaging)
-    aggregated_features = np.mean(features_list, axis=0)
-    return aggregated_features
+    # Save all extracted features to the database at once
+    database.save_material_features(video_filename, features_to_save)
+    print(f"Saved {len(features_to_save)} feature vectors for {video_filename} to the database.")
+    return True
 
 def process_recorded_video(video_path: str):
     """

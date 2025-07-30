@@ -7,6 +7,7 @@ opencv-python-headless
 numpy
 scikit-learn
 accelerate # Added for device_map="auto"
+quanto # For model quantization on MPS
 
 # GUI Frameworks (choose one or more)
 pyqt5

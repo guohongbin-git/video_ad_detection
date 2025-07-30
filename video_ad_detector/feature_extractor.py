@@ -23,6 +23,8 @@ logging.basicConfig(
     ]
 )
 
+import quanto
+import logging
 # --- Model and Processor Initialization ---
 
 processor = None
@@ -36,11 +38,21 @@ try:
     logging.info("Processor loaded.")
 
     logging.info(f"Loading full multimodal model from: {config.GEMMA_MODEL_PATH}")
+    # Load the model in full precision first
     model = Gemma3ForConditionalGeneration.from_pretrained(
         config.GEMMA_MODEL_PATH,
-        
+        torch_dtype=torch.float16 # Load in float16 to save memory before quantization
     )
-    logging.info("Full multimodal model loaded.")
+    logging.info("Full multimodal model loaded in float16.")
+
+    # Quantize the model using quanto for MPS compatibility
+    logging.info("Quantizing model to int4 using quanto...")
+    quanto.quantize(model, weights=quanto.qint4, activations=None)
+    logging.info("Model quantization complete.")
+
+    # Move the quantized model to the correct device
+    model = model.to(config.DEVICE)
+    logging.info(f"Quantized model moved to device: {config.DEVICE}")
 
     if model:
         vision_encoder = model.vision_tower

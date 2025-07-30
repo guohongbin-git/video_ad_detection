@@ -87,11 +87,16 @@
 
 ### 通过Web界面
 
-1.  **启动应用**:
+1.  **激活虚拟环境**:
     ```bash
-    streamlit run video_ad_detector/gui.py
+    source .venv/bin/activate
     ```
-2.  **操作**:
+
+2.  **启动应用**:
+    ```bash
+    streamlit run run_gui.py
+    ```
+3.  **操作**:
     -   在打开的网页界面中，使用“上传广告素材”功能录入素材。
     -   使用“上传实拍视频进行检测”功能进行检测。结果会显示在界面上，同时PDF报告也会在后台生成。
 

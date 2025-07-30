@@ -12,8 +12,10 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+.DS_Store
 
 # Local Data & Models (IMPORTANT)
+data/
 gemma-3-4b-it/
 paligemma2-3b-pt-224/
 video_ad_detector/database/
