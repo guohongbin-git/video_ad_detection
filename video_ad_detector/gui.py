@@ -40,8 +40,8 @@ def main():
     # --- Sidebar ---
     st.sidebar.title("Workflow")
 
-    # --- 1. Load Feature Library ---
-    st.sidebar.header("1. Load Feature Library")
+    # --- 1. Load Description Library ---
+    st.sidebar.header("1. Load Description Library")
     try:
         available_materials = database.get_all_material_filenames()
     except Exception as e:
@@ -56,19 +56,19 @@ def main():
             options=available_materials,
             default=available_materials
         )
-        if st.sidebar.button("Load Selected Features"):
+        if st.sidebar.button("Load Selected Descriptions"):
             if not selected_materials:
                 st.sidebar.warning("Please select at least one material.")
             else:
-                with st.spinner(f"Loading features for {len(selected_materials)} material(s)..."):
-                    ad_detector._load_all_material_features(filenames_to_load=selected_materials)
-                    st.session_state.features_loaded = True
-                    st.sidebar.success("✅ Features loaded and ready.")
+                with st.spinner(f"Loading descriptions for {len(selected_materials)} material(s)..."):
+                    ad_detector._load_material_descriptions(filenames_to_load=selected_materials)
+                    st.session_state.features_loaded = True # Keep the name for now, but it means descriptions are loaded
+                    st.sidebar.success("✅ Descriptions loaded and ready.")
 
     # --- 2. Detect Ad in a Video ---
     st.sidebar.header("2. Detect Ad in Video")
     if not st.session_state.features_loaded:
-        st.sidebar.info("Load a feature library before detection.")
+        st.sidebar.info("Load a description library before detection.")
 
     recorded_video_file = st.sidebar.file_uploader(
         "Upload a video to check for ads",
@@ -115,9 +115,11 @@ def main():
                         destination_path = os.path.join(config.MATERIALS_DIR, material_file.name)
                         try:
                             shutil.copyfile(temp_material_path, destination_path)
-                            # We now save features for each sampled frame, not an aggregated one.
+                            # Add to database BEFORE processing
+                            database.add_material(material_file.name)
+                            # Now, process material video to generate descriptions (not save features to DB)
                             video_processor.process_material_video(destination_path, progress_callback=update_progress)
-                            st.success(f"Successfully processed {material_file.name}")
+                            st.success(f"Successfully generated descriptions for {material_file.name}")
                             processed_count += 1
                         except Exception as e:
                             st.error(f"Error processing {material_file.name}: {e}")
