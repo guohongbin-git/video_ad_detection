@@ -4,12 +4,12 @@ import tempfile
 import shutil
 import numpy as np
 
-# Import project modules using relative imports
-from . import database
-from . import video_processor
-from . import ad_detector
-from . import reporter
-from . import config
+# Import project modules using absolute imports
+from video_ad_detector import database
+from video_ad_detector import video_processor
+from video_ad_detector import ad_detector
+from video_ad_detector import reporter
+from video_ad_detector import config
 
 def save_uploaded_file(uploaded_file):
     """Saves uploaded file to a temporary path and returns the path."""
