@@ -1,27 +1,27 @@
-
 import cv2
 import numpy as np
 import os
 from PIL import Image
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import cosine_similarity # Now needed for embedding similarity
 from . import database, config, feature_extractor, video_processor
 import time
+# import difflib # No longer needed for simple string similarity
 
-# --- Global cache for material features ---
-MATERIAL_FRAME_FEATURES_CACHE = {}
+# --- Global cache for material descriptions ---
+MATERIAL_DESCRIPTIONS_CACHE = {}
 
-def _load_all_material_features(filenames_to_load: list[str] | None = None):
+def _load_material_descriptions(filenames_to_load: list[str] | None = None):
     """
-    Loads features from the database into the in-memory cache.
-    If filenames_to_load is provided, only those files are loaded.
-    Otherwise, all materials from the database are loaded.
+    Loads keyframe descriptions from material videos into the in-memory cache.
+    For each material video, it extracts the first, middle, and last frames,
+    generates their semantic descriptions using the multimodal model (with OCR),
+    and caches these descriptions.
     """
-    MATERIAL_FRAME_FEATURES_CACHE.clear()
-    print("Building material feature cache from database...")
+    MATERIAL_DESCRIPTIONS_CACHE.clear()
+    print("Building material description cache from videos...")
     start_time = time.time()
 
     if filenames_to_load is None:
-        # If no specific files are requested, load all of them.
         filenames_to_load = database.get_all_material_filenames()
 
     if not filenames_to_load:
@@ -29,32 +29,101 @@ def _load_all_material_features(filenames_to_load: list[str] | None = None):
         return
 
     for filename in filenames_to_load:
-        # This is now the correct, fast way: loading pre-computed features.
-        features_data = database.get_features_by_filename(filename)
-        if features_data:
-            # The data from DB is a list of tuples (timestamp, features_blob)
-            # We need to convert it back to the desired dict format.
-            MATERIAL_FRAME_FEATURES_CACHE[filename] = [
-                {"time": time, "features": np.frombuffer(blob, dtype=np.float32)}
-                for time, blob in features_data
-            ]
-            print(f"Loaded {len(features_data)} feature vectors for {filename} from database.")
+        material_video_path = os.path.join(config.MATERIALS_DIR, filename)
+        cap = cv2.VideoCapture(material_video_path)
+        if not cap.isOpened():
+            print(f"Error: Could not open material video at {material_video_path}")
+            continue
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS)
+
+        if total_frames == 0 or fps == 0:
+            print(f"Warning: No frames or zero FPS for {filename}")
+            cap.release()
+            continue
+
+        keyframes_to_process = []
+        # First frame
+        keyframes_to_process.append((0, 0.0))
+        # Middle frame
+        if total_frames > 1:
+            middle_frame_num = total_frames // 2
+            middle_time = middle_frame_num / fps
+            keyframes_to_process.append((middle_frame_num, middle_time))
+        # Last frame
+        if total_frames > 1:
+            last_frame_num = total_frames - 1
+            last_time = last_frame_num / fps
+            keyframes_to_process.append((last_frame_num, last_time))
+
+        material_descriptions = []
+        for frame_num, frame_time in keyframes_to_process:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ret, frame = cap.read()
+            if ret:
+                image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                description = feature_extractor.generate_description(image)
+                material_descriptions.append({
+                    "time": frame_time,
+                    "description": description,
+                    "original_image": image # Store for potential screenshot generation later
+                })
+            else:
+                print(f"Warning: Could not read frame {frame_num} from {filename}")
+        
+        cap.release()
+        if material_descriptions:
+            MATERIAL_DESCRIPTIONS_CACHE[filename] = {data["time"]: data for data in material_descriptions}
+            print(f"Loaded {len(material_descriptions)} keyframe descriptions for {filename}.")
         else:
-            print(f"Warning: No features found in database for {filename}")
+            print(f"Warning: No descriptions generated for {filename}")
 
     end_time = time.time()
-    print(f"Feature cache built in {end_time - start_time:.2f} seconds.")
+    print(f"Material description cache built in {end_time - start_time:.2f} seconds.")
+
+def _calculate_semantic_similarity(desc1: str, desc2: str) -> float:
+    """
+    Calculates semantic similarity between two text descriptions using text embeddings.
+    """
+    if not desc1 or not desc2:
+        return 0.0
+    
+    embedding1 = feature_extractor.get_text_embedding(desc1)
+    embedding2 = feature_extractor.get_text_embedding(desc2)
+
+    if embedding1.size == 0 or embedding2.size == 0:
+        return 0.0
+
+    # Reshape for cosine_similarity: (1, n_features)
+    return cosine_similarity(embedding1.reshape(1, -1), embedding2.reshape(1, -1))[0][0]
 
 def find_matching_ad_segments(recorded_video_path: str):
     """
-    Analyzes a recorded video by comparing each of its frames against a pre-cached library
-    of every frame from all material videos.
+    Analyzes a recorded video by comparing its frames' semantic descriptions
+    against pre-cached keyframe descriptions from material videos.
+    For each material keyframe (first, middle, last), it finds the best matching
+    frame in the recorded video.
     """
-    # 1. Ensure the material feature cache is loaded
-    _load_all_material_features()
-    if not MATERIAL_FRAME_FEATURES_CACHE:
-        print("Error: Material feature cache is empty. Cannot perform detection.")
+    # 1. Ensure the material description cache is loaded
+    _load_material_descriptions()
+    if not MATERIAL_DESCRIPTIONS_CACHE:
+        print("Error: Material description cache is empty. Cannot perform detection.")
         return None
+
+    # Initialize best matches for each material keyframe
+    # Structure: {material_filename: {material_time: {recorded_time, similarity, recorded_frame_image, recorded_frame_description}}}
+    best_matches_per_material_keyframe = {}
+    for material_filename, material_descriptions_dict in MATERIAL_DESCRIPTIONS_CACHE.items():
+        best_matches_per_material_keyframe[material_filename] = {}
+        for material_time, material_frame_data in material_descriptions_dict.items():
+            best_matches_per_material_keyframe[material_filename][material_time] = {
+                "similarity": -1.0, # Initialize with a very low similarity
+                "recorded_time": None,
+                "recorded_frame_image": None,
+                "recorded_frame_description": None
+            }
 
     # 2. Process the recorded video frame by frame
     cap = cv2.VideoCapture(recorded_video_path)
@@ -65,85 +134,139 @@ def find_matching_ad_segments(recorded_video_path: str):
     fps = cap.get(cv2.CAP_PROP_FPS)
     frame_interval = max(1, int(fps)) # Sample one frame per second
     frame_count = 0
-    detected_matches = []
+    total_matched_duration_in_recorded = 0.0
+    matched_recorded_times = set() # To count unique matched seconds for total duration
 
-    print("Starting frame-by-frame analysis of recorded video...")
+    print("Starting semantic analysis of recorded video...")
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        # --- OPTIMIZATION: Process only one frame per second ---
         if frame_count % frame_interval == 0:
             current_recorded_time = frame_count / fps
-            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            current_features = feature_extractor.extract_features(image)
+            
+            # Detect video playback area and crop the frame
+            x, y, w, h = video_processor.detect_video_playback_area(frame)
+            cropped_frame = frame[y:y+h, x:x+w]
+            
+            if cropped_frame.size == 0:
+                print(f"Warning: Cropped frame is empty at time {current_recorded_time:.2f}s. Skipping.")
+                frame_count += 1
+                continue
 
-            # 3. Compare the current frame against every cached material frame
-            for material_filename, material_frames in MATERIAL_FRAME_FEATURES_CACHE.items():
-                for material_frame_data in material_frames:
-                    similarity = cosine_similarity(current_features.reshape(1, -1), material_frame_data["features"].reshape(1, -1))[0][0]
+            # Save cropped frame for debugging if enabled
+            if config.SAVE_DEBUG_FRAMES:
+                debug_frame_path = os.path.join(config.DEBUG_FRAMES_DIR, f"recorded_frame_{int(current_recorded_time * 1000)}.jpg")
+                cv2.imwrite(debug_frame_path, cropped_frame)
+
+            image_for_description = Image.fromarray(cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2RGB))
+            
+            # Stage 1: Generate preliminary description without OCR
+            prelim_recorded_frame_description = feature_extractor.generate_description(image_for_description, perform_ocr=False)
+
+            # Compare with all material keyframes for preliminary similarity
+            for material_filename, material_descriptions_dict in MATERIAL_DESCRIPTIONS_CACHE.items():
+                for material_time, material_frame_data in material_descriptions_dict.items():
+                    prelim_similarity = _calculate_semantic_similarity(prelim_recorded_frame_description, material_frame_data["description"])
                     
-                    if similarity >= config.SIMILARITY_THRESHOLD:
-                        detected_matches.append({
-                            "recorded_time": current_recorded_time,
-                            "material_filename": material_filename,
-                            "material_time": material_frame_data["time"],
-                            "similarity": similarity
-                        })
+                    if prelim_similarity >= config.PRELIMINARY_SIMILARITY_THRESHOLD:
+                        # Stage 2: If preliminary match, generate full description with OCR for the recorded frame
+                        final_recorded_frame_description = feature_extractor.generate_description(image_for_description, perform_ocr=True)
+                        final_similarity = _calculate_semantic_similarity(final_recorded_frame_description, material_frame_data["description"])
+                        
+                        if final_similarity >= best_matches_per_material_keyframe[material_filename][material_time]["similarity"]:
+                            best_matches_per_material_keyframe[material_filename][material_time] = {
+                                "similarity": final_similarity,
+                                "recorded_time": current_recorded_time,
+                                "recorded_frame_image": image_for_description,
+                                "recorded_frame_description": final_recorded_frame_description
+                            }
+                            matched_recorded_times.add(current_recorded_time) # Add to set for total duration
         
         frame_count += 1
 
     cap.release()
-    print(f"Analysis complete. Found {len(detected_matches)} potential matches.")
+    
+    # Calculate total matched duration
+    total_matched_duration_in_recorded = len(matched_recorded_times) / fps
 
-    if not detected_matches:
+    # 3. Assemble comparison screenshots and data for report
+    comparison_screenshots = []
+    overall_similarity_score = 0.0
+    best_match_filename = "N/A"
+    material_duration = 0.0
+
+    all_best_matches = []
+    for material_filename, keyframe_matches in best_matches_per_material_keyframe.items():
+        for material_time, match_data in keyframe_matches.items():
+            if match_data["recorded_time"] is not None: # Only include if a match was found
+                material_frame_data = MATERIAL_DESCRIPTIONS_CACHE[material_filename][material_time]
+                all_best_matches.append({
+                    "recorded_time": match_data["recorded_time"],
+                    "material_filename": material_filename,
+                    "material_time": material_time,
+                    "similarity": match_data["similarity"],
+                    "recorded_frame_image": match_data["recorded_frame_image"],
+                    "recorded_frame_description": match_data["recorded_frame_description"],
+                    "material_frame_image": material_frame_data["original_image"],
+                    "material_frame_description": material_frame_data["description"]
+                })
+    
+    # Sort all best matches by similarity to pick top N for report, if needed
+    all_best_matches_sorted = sorted(all_best_matches, key=lambda x: x["similarity"], reverse=True)
+
+    if not all_best_matches_sorted:
+        print("No ad content detected in the recorded video based on keyframe matching.")
         return None
 
-    # 4. Post-process and prepare report data
-    # Sort by similarity to find the best evidence
-    top_matches = sorted(detected_matches, key=lambda x: x["similarity"], reverse=True)[:config.NUM_SCREENSHOTS]
-
-    # Determine the best overall matched material for the summary
-    best_match_overall = top_matches[0]
-    best_match_filename = best_match_overall["material_filename"]
+    # Determine the best overall match for summary (highest similarity among all keyframe matches)
+    best_overall_match_data = all_best_matches_sorted[0]
+    overall_similarity_score = best_overall_match_data["similarity"]
+    best_match_filename = best_overall_match_data["material_filename"]
     material_video_path = os.path.join(config.MATERIALS_DIR, best_match_filename)
     material_duration = video_processor.get_video_duration(material_video_path)
 
-    # Calculate total matched duration (simplified)
-    # We assume each matched frame represents 1/fps seconds of ad content.
-    total_matched_duration = len(set(match["recorded_time"] for match in detected_matches)) / fps
+    # Filter comparison screenshots to only include those from the best matched material
+    filtered_comparison_matches = []
+    for match in all_best_matches_sorted:
+        if match["material_filename"] == best_match_filename:
+            filtered_comparison_matches.append(match)
+    
+    # Ensure we only take NUM_SCREENSHOTS (3) from the filtered list, sorted by material_time for consistency
+    # This assumes material_descriptions are added in order (first, middle, last)
+    comparison_screenshots_for_report = sorted(filtered_comparison_matches, key=lambda x: x["material_time"])[:config.NUM_SCREENSHOTS]
 
-    # 5. Extract the correctly paired screenshots for the report
-    comparison_screenshots = []
-    for i, match in enumerate(top_matches):
-        screenshot_base_name = f"{os.path.basename(recorded_video_path)}_{i}"
+    # 5. Extract and save the correctly paired screenshots for the report
+    for i, match in enumerate(comparison_screenshots_for_report):
+        screenshot_base_name = f"{os.path.basename(recorded_video_path).split('.')[0]}_{i}"
         recorded_ss_path = os.path.join(config.SCREENSHOTS_DIR, f"rec_{screenshot_base_name}.jpg")
         material_ss_path = os.path.join(config.SCREENSHOTS_DIR, f"mat_{screenshot_base_name}.jpg")
 
-        recorded_frame = video_processor.extract_frame_at_time(recorded_video_path, match["recorded_time"], recorded_ss_path)
-        material_frame = video_processor.extract_frame_at_time(
-            os.path.join(config.MATERIALS_DIR, match["material_filename"]),
-            match["material_time"],
-            material_ss_path
-        )
-
-        if recorded_frame and material_frame:
+        try:
+            os.makedirs(config.SCREENSHOTS_DIR, exist_ok=True)
+            match["recorded_frame_image"].save(recorded_ss_path)
+            match["material_frame_image"].save(material_ss_path)
+            
             comparison_screenshots.append({
-                "recorded_frame_path": recorded_frame,
-                "material_frame_path": material_frame,
+                "recorded_frame_path": os.path.abspath(recorded_ss_path),
+                "material_frame_path": os.path.abspath(material_ss_path),
                 "recorded_time": match["recorded_time"],
-                "material_time": match["material_time"]
+                "material_time": match["material_time"],
+                "recorded_frame_description": match["recorded_frame_description"],
+                "material_frame_description": match["material_frame_description"]
             })
+        except Exception as e:
+            print(f"Error saving screenshot {i}: {e}")
 
-    # 6. Assemble the final report data package
+    # 4. Assemble the final report data package
     report_data = {
         "recorded_video_path": recorded_video_path,
         "best_match_material_filename": best_match_filename,
-        "overall_similarity_score": best_match_overall["similarity"],
+        "overall_similarity_score": overall_similarity_score,
         "material_duration": material_duration,
-        "total_matched_duration_in_recorded": total_matched_duration,
-        "comparison_screenshots": comparison_screenshots
+        "total_matched_duration_in_recorded": total_matched_duration_in_recorded,
+        "comparison_screenshots": comparison_screenshots # This now contains specific keyframe matches
     }
 
     return report_data
