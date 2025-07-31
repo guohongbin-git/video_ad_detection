@@ -152,3 +152,20 @@ def get_text_embedding(text: str) -> np.ndarray:
     except Exception as e:
         logging.error(f"An error occurred during text embedding generation via LM Studio API: {e}", exc_info=True)
         return np.array([])
+
+def calculate_semantic_similarity(desc1: str, desc2: str) -> float:
+    """
+    Calculates semantic similarity between two text descriptions using text embeddings.
+    """
+    if not desc1 or not desc2:
+        return 0.0
+    
+    embedding1 = get_text_embedding(desc1)
+    embedding2 = get_text_embedding(desc2)
+
+    if embedding1.size == 0 or embedding2.size == 0:
+        return 0.0
+
+    # Reshape for cosine_similarity: (1, n_features)
+    from sklearn.metrics.pairwise import cosine_similarity # Import here to avoid circular dependency
+    return cosine_similarity(embedding1.reshape(1, -1), embedding2.reshape(1, -1))[0][0]

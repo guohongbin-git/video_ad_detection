@@ -93,6 +93,11 @@ def process_material_video(video_path: str, progress_callback=None):
         return False
 
     video_filename = os.path.basename(video_path)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    orientation = "landscape" if width > height else "portrait"
+    database.add_material(video_filename, orientation)
+
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
@@ -141,21 +146,25 @@ def process_material_video(video_path: str, progress_callback=None):
     print(f"Successfully processed and saved {len(descriptions)} descriptions for {video_filename}.")
     return True
 
-def detect_video_playback_area(frame: np.ndarray) -> tuple[int, int, int, int]:
+def detect_video_playback_area(frame: np.ndarray, expected_orientation: str = "auto") -> tuple[int, int, int, int]:
     """
     Detects the video playback area within a given frame using edge detection and contour analysis.
     It attempts to find the largest rectangular contour, assuming it corresponds to the video player.
+    The detection is guided by an expected orientation (landscape, portrait, or auto).
 
     Args:
         frame (np.ndarray): The input video frame (H, W, C).
+        expected_orientation (str): The expected orientation of the video content ("landscape", "portrait", or "auto").
+                                    If "auto", it will try to find the best fit.
 
     Returns:
         tuple[int, int, int, int]: A tuple (x, y, w, h) representing the bounding box
                                    of the detected video playback area. If no suitable
-                                   area is found, it defaults to the central 80% of the frame.
+                                   area is found, it defaults to the central 80% of the frame
+                                   based on the expected orientation.
     """
     h, w, _ = frame.shape
-    logging.debug(f"Input frame dimensions: W={w}, H={h}")
+    logging.debug(f"Input frame dimensions: W={w}, H={h}, Expected Orientation: {expected_orientation}")
 
     # Convert to grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -186,25 +195,124 @@ def detect_video_playback_area(frame: np.ndarray) -> tuple[int, int, int, int]:
             area = current_w * current_h
             logging.debug(f"  Contour {i}: x={x}, y={y}, w={current_w}, h={current_h}, aspect_ratio={aspect_ratio:.2f}, area={area}")
 
-            # Filter for reasonable aspect ratios (e.g., 16:9, 4:3, or close to it)
-            # and ensure it's not too small or too large (e.g., not the whole frame)
-            if 0.4 < aspect_ratio < 3.0 and area > (w * h * 0.05) and area < (w * h * 0.98):
+            # Filter for reasonable aspect ratios based on expected_orientation
+            is_suitable_aspect_ratio = False
+            if expected_orientation == "landscape":
+                if 1.3 < aspect_ratio < 2.5: # Typical landscape aspect ratios (e.g., 16:9, 4:3)
+                    is_suitable_aspect_ratio = True
+            elif expected_orientation == "portrait":
+                if 0.4 < aspect_ratio < 0.8: # Typical portrait aspect ratios (e.g., 9:16, 3:4)
+                    is_suitable_aspect_ratio = True
+            else: # auto or unknown
+                # Accept a wider range if orientation is not specified or auto
+                if 0.4 < aspect_ratio < 2.5:
+                    is_suitable_aspect_ratio = True
+
+            # Ensure it's not too small or too large (e.g., not the whole frame)
+            if is_suitable_aspect_ratio and area > (w * h * 0.05) and area < (w * h * 0.98):
                 if area > largest_area:
                     largest_area = area
                     best_rect = (x, y, current_w, current_h)
     
-    # If no suitable rectangle is found, fall back to the central 80% as before
+    # If no suitable rectangle is found, fall back to a central area based on expected orientation
     if largest_area == 0:
-        player_w = int(w * 0.8)
-        player_h = int(h * 0.8)
+        if expected_orientation == "portrait":
+            player_h = int(h * 0.8)
+            player_w = int(player_h * (9/16)) # Assume 9:16 for portrait fallback
+        else: # Default to landscape fallback
+            player_w = int(w * 0.8)
+            player_h = int(player_w * (9/16)) # Assume 16:9 for landscape fallback
+        
         x = (w - player_w) // 2
         y = (h - player_h) // 2
         best_rect = (x, y, player_w, player_h)
-        logging.warning("No suitable video playback area found, defaulting to central 80% of frame.")
+        logging.warning(f"No suitable video playback area found for {expected_orientation} orientation, defaulting to central 80% of frame with assumed aspect ratio.")
     else:
-        logging.info(f"Detected video playback area: {best_rect}")
+        logging.info(f"Detected video playback area: {best_rect} for {expected_orientation} orientation.")
 
     return best_rect
+
+def get_representative_recorded_frames(recorded_video_path: str, progress_callback=None) -> list[dict]:
+    """
+    Processes a recorded video to extract representative frames based on semantic similarity.
+    It samples frames at a fixed interval (e.g., 1 frame per second) and then filters them
+    to keep only frames whose semantic description is significantly different from the previous one.
+
+    Args:
+        recorded_video_path (str): The path to the recorded video file.
+        progress_callback (callable, optional): A callback function to update progress.
+
+    Returns:
+        list[dict]: A list of dictionaries, each containing 'time', 'image', and 'description'
+                    for the representative frames.
+    """
+    cap = cv2.VideoCapture(recorded_video_path)
+    if not cap.isOpened():
+        print(f"Error: Could not open recorded video at {recorded_video_path}")
+        return []
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_interval = max(1, int(fps)) # Sample one frame per second
+
+    if total_frames == 0 or fps == 0:
+        print(f"Warning: No frames or zero FPS for {recorded_video_path}")
+        cap.release()
+        return []
+
+    representative_frames = []
+    previous_description = ""
+    frame_count = 0
+    processed_frames_count = 0
+    num_frames_to_process = len(range(0, total_frames, frame_interval))
+
+    print(f"Extracting representative frames from {recorded_video_path}...")
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_count % frame_interval == 0:
+            current_recorded_time = frame_count / fps
+            
+            # Detect video playback area and crop the frame (auto orientation for recorded video)
+            x, y, w, h = detect_video_playback_area(frame, expected_orientation="auto")
+            cropped_frame = frame[y:y+h, x:x+w]
+            
+            if cropped_frame.size == 0:
+                print(f"Warning: Cropped frame is empty at time {current_recorded_time:.2f}s. Skipping.")
+                frame_count += 1
+                continue
+
+            # Save cropped frame for debugging if enabled
+            if config.SAVE_DEBUG_FRAMES:
+                debug_frame_path = os.path.join(config.DEBUG_FRAMES_DIR, f"recorded_frame_{int(current_recorded_time * 1000)}.jpg")
+                cv2.imwrite(debug_frame_path, cropped_frame)
+
+            image_for_description = Image.fromarray(cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2RGB))
+            
+            # Generate description for the current frame (with OCR)
+            current_description = feature_extractor.generate_description(image_for_description, perform_ocr=True)
+
+            # Compare with the previous representative frame's description
+            if not representative_frames or feature_extractor.calculate_semantic_similarity(previous_description, current_description) < config.REPRESENTATIVE_FRAME_SIMILARITY_THRESHOLD:
+                representative_frames.append({
+                    "time": current_recorded_time,
+                    "image": image_for_description,
+                    "description": current_description
+                })
+                previous_description = current_description
+                print(f"  - Added representative frame at {current_recorded_time:.2f}s. Desc: {current_description[:50]}...")
+            
+            processed_frames_count += 1
+            if progress_callback:
+                progress_callback(processed_frames_count / num_frames_to_process, f"Processing recorded frame {processed_frames_count}/{num_frames_to_process}")
+
+        frame_count += 1
+
+    cap.release()
+    print(f"Finished extracting representative frames. Total: {len(representative_frames)}")
+    return representative_frames
 
 def process_recorded_video(video_path: str):
     """

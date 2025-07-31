@@ -16,7 +16,8 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS materials (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT UNIQUE
+            filename TEXT UNIQUE,
+            orientation TEXT
         )
     """)
     # Table for individual frame features, linked to a material
@@ -41,13 +42,13 @@ def init_db():
     conn.commit()
     conn.close()
 
-def add_material(filename: str):
+def add_material(filename: str, orientation: str):
     """
-    Adds a new material filename to the database.
+    Adds a new material filename and its orientation to the database.
     """
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO materials (filename) VALUES (?)", (filename,))
+    cursor.execute("INSERT OR IGNORE INTO materials (filename, orientation) VALUES (?, ?)", (filename, orientation))
     conn.commit()
     conn.close()
 
@@ -106,16 +107,16 @@ def get_features_by_filename(filename: str) -> list[tuple[float, bytes]]:
     conn.close()
     return rows
 
-def get_all_material_filenames() -> list[str]:
+def get_all_materials() -> list[tuple[str, str]]:
     """
-    Retrieves all material filenames from the database.
+    Retrieves all material filenames and their orientations from the database.
     """
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT filename FROM materials ORDER BY filename")
+    cursor.execute("SELECT filename, orientation FROM materials ORDER BY filename")
     rows = cursor.fetchall()
     conn.close()
-    return [row[0] for row in rows]
+    return rows
 
 def save_material_descriptions(filename: str, descriptions_data: list[dict]):
     """

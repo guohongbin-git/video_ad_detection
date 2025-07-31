@@ -43,7 +43,9 @@ def main():
     # --- 1. Load Description Library ---
     st.sidebar.header("1. Load Description Library")
     try:
-        available_materials = database.get_all_material_filenames()
+        # get_all_materials now returns (filename, orientation) tuples
+        available_materials_data = database.get_all_materials()
+        available_materials = [f for f, o in available_materials_data] # Extract just filenames for multiselect options
     except Exception as e:
         st.sidebar.error(f"DB Error: {e}")
         available_materials = []
@@ -115,9 +117,7 @@ def main():
                         destination_path = os.path.join(config.MATERIALS_DIR, material_file.name)
                         try:
                             shutil.copyfile(temp_material_path, destination_path)
-                            # Add to database BEFORE processing
-                            database.add_material(material_file.name)
-                            # Now, process material video to generate descriptions (not save features to DB)
+                            # Process material video to generate descriptions and add to DB
                             video_processor.process_material_video(destination_path, progress_callback=update_progress)
                             st.success(f"Successfully generated descriptions for {material_file.name}")
                             processed_count += 1
