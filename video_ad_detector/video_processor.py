@@ -2,8 +2,9 @@ import cv2
 import os
 from PIL import Image
 import numpy as np
+import logging # Import logging module
 from video_ad_detector import config
-from video_ad_detector import feature_extractor
+from . import feature_extractor
 from . import database
 
 def get_video_duration(video_path: str) -> float:
@@ -83,7 +84,8 @@ def extract_frame_at_time(video_path: str, time_in_seconds: float, output_path: 
 
 def process_material_video(video_path: str, progress_callback=None):
     """
-    Processes a material video to extract, and SAVE, features for each sampled frame.
+    Processes a material video to extract keyframes and generate their semantic descriptions.
+    These descriptions are then used by the ad_detector.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -91,47 +93,118 @@ def process_material_video(video_path: str, progress_callback=None):
         return False
 
     video_filename = os.path.basename(video_path)
-    features_to_save = []
-    frame_count = 0
-    processed_frames_count = 0
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_interval = max(1, int(fps))  # Sample one frame per second
 
-    num_frames_to_process = len(range(0, total_frames, frame_interval))
-    if num_frames_to_process == 0:
-        print(f"Warning: No frames to process for {video_filename}")
+    if total_frames == 0 or fps == 0:
+        print(f"Warning: No frames or zero FPS for {video_filename}")
         cap.release()
         return False
 
-    while cap.isOpened():
+    keyframes_to_process = []
+    # First frame
+    keyframes_to_process.append((0, 0.0))
+    # Middle frame
+    if total_frames > 1:
+        middle_frame_num = total_frames // 2
+        middle_time = middle_frame_num / fps
+        keyframes_to_process.append((middle_frame_num, middle_time))
+    # Last frame
+    if total_frames > 1:
+        last_frame_num = total_frames - 1
+        last_time = last_frame_num / fps
+        keyframes_to_process.append((last_frame_num, last_time))
+
+    print(f"Processing keyframes for material video: {video_filename}")
+    descriptions = []
+    for i, (frame_num, frame_time) in enumerate(keyframes_to_process):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
         ret, frame = cap.read()
-        if not ret:
-            break
-
-        if frame_count % frame_interval == 0:
-            processed_frames_count += 1
+        if ret:
             image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            features = feature_extractor.extract_features(image)
-            current_time_sec = frame_count / fps
-            features_to_save.append((current_time_sec, features))
-
+            description = feature_extractor.generate_description(image)
+            descriptions.append({"time": frame_time, "description": description})
+            print(f"  - Frame at {frame_time:.2f}s description: {description[:50]}...") # Print first 50 chars
             if progress_callback:
-                progress = processed_frames_count / num_frames_to_process
-                progress_callback(progress, f"Processing sampled frame {processed_frames_count}/{num_frames_to_process}")
-
-        frame_count += 1
-
+                progress_callback((i + 1) / len(keyframes_to_process), f"Generating description for keyframe {i+1}/{len(keyframes_to_process)}")
+        else:
+            print(f"Warning: Could not read frame {frame_num} from {video_filename}")
+    
     cap.release()
 
-    if not features_to_save:
-        print(f"Error: No features were extracted from {video_filename}")
+    if not descriptions:
+        print(f"Error: No descriptions were generated for {video_filename}")
         return False
-
-    # Save all extracted features to the database at once
-    database.save_material_features(video_filename, features_to_save)
-    print(f"Saved {len(features_to_save)} feature vectors for {video_filename} to the database.")
+    
+    # Save the generated descriptions to the database
+    database.save_material_descriptions(video_filename, descriptions)
+    print(f"Successfully processed and saved {len(descriptions)} descriptions for {video_filename}.")
     return True
+
+def detect_video_playback_area(frame: np.ndarray) -> tuple[int, int, int, int]:
+    """
+    Detects the video playback area within a given frame using edge detection and contour analysis.
+    It attempts to find the largest rectangular contour, assuming it corresponds to the video player.
+
+    Args:
+        frame (np.ndarray): The input video frame (H, W, C).
+
+    Returns:
+        tuple[int, int, int, int]: A tuple (x, y, w, h) representing the bounding box
+                                   of the detected video playback area. If no suitable
+                                   area is found, it defaults to the central 80% of the frame.
+    """
+    h, w, _ = frame.shape
+    logging.debug(f"Input frame dimensions: W={w}, H={h}")
+
+    # Convert to grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # Apply Gaussian blur to reduce noise and help with edge detection
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Use Canny edge detector
+    edges = cv2.Canny(blurred, 30, 100) # Adjusted thresholds
+    logging.debug(f"Canny edges non-zero pixels: {np.count_nonzero(edges)}")
+
+    # Find contours
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    logging.debug(f"Found {len(contours)} contours.")
+
+    largest_area = 0
+    best_rect = (0, 0, w, h) # Default to full frame if nothing suitable is found
+
+    for i, contour in enumerate(contours):
+        # Approximate the contour to a polygon
+        perimeter = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
+
+        # If the approximated contour has 4 vertices (a rectangle)
+        if len(approx) == 4:
+            x, y, current_w, current_h = cv2.boundingRect(approx)
+            aspect_ratio = float(current_w) / current_h
+            area = current_w * current_h
+            logging.debug(f"  Contour {i}: x={x}, y={y}, w={current_w}, h={current_h}, aspect_ratio={aspect_ratio:.2f}, area={area}")
+
+            # Filter for reasonable aspect ratios (e.g., 16:9, 4:3, or close to it)
+            # and ensure it's not too small or too large (e.g., not the whole frame)
+            if 0.4 < aspect_ratio < 3.0 and area > (w * h * 0.05) and area < (w * h * 0.98):
+                if area > largest_area:
+                    largest_area = area
+                    best_rect = (x, y, current_w, current_h)
+    
+    # If no suitable rectangle is found, fall back to the central 80% as before
+    if largest_area == 0:
+        player_w = int(w * 0.8)
+        player_h = int(h * 0.8)
+        x = (w - player_w) // 2
+        y = (h - player_h) // 2
+        best_rect = (x, y, player_w, player_h)
+        logging.warning("No suitable video playback area found, defaulting to central 80% of frame.")
+    else:
+        logging.info(f"Detected video playback area: {best_rect}")
+
+    return best_rect
 
 def process_recorded_video(video_path: str):
     """

@@ -12,13 +12,10 @@ MATERIAL_DESCRIPTIONS_CACHE = {}
 
 def _load_material_descriptions(filenames_to_load: list[str] | None = None):
     """
-    Loads keyframe descriptions from material videos into the in-memory cache.
-    For each material video, it extracts the first, middle, and last frames,
-    generates their semantic descriptions using the multimodal model (with OCR),
-    and caches these descriptions.
+    Loads keyframe descriptions from the database into the in-memory cache.
     """
     MATERIAL_DESCRIPTIONS_CACHE.clear()
-    print("Building material description cache from videos...")
+    print("Loading material descriptions from database...")
     start_time = time.time()
 
     if filenames_to_load is None:
@@ -29,56 +26,12 @@ def _load_material_descriptions(filenames_to_load: list[str] | None = None):
         return
 
     for filename in filenames_to_load:
-        material_video_path = os.path.join(config.MATERIALS_DIR, filename)
-        cap = cv2.VideoCapture(material_video_path)
-        if not cap.isOpened():
-            print(f"Error: Could not open material video at {material_video_path}")
-            continue
-
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS)
-
-        if total_frames == 0 or fps == 0:
-            print(f"Warning: No frames or zero FPS for {filename}")
-            cap.release()
-            continue
-
-        keyframes_to_process = []
-        # First frame
-        keyframes_to_process.append((0, 0.0))
-        # Middle frame
-        if total_frames > 1:
-            middle_frame_num = total_frames // 2
-            middle_time = middle_frame_num / fps
-            keyframes_to_process.append((middle_frame_num, middle_time))
-        # Last frame
-        if total_frames > 1:
-            last_frame_num = total_frames - 1
-            last_time = last_frame_num / fps
-            keyframes_to_process.append((last_frame_num, last_time))
-
-        material_descriptions = []
-        for frame_num, frame_time in keyframes_to_process:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-            ret, frame = cap.read()
-            if ret:
-                image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                description = feature_extractor.generate_description(image)
-                material_descriptions.append({
-                    "time": frame_time,
-                    "description": description,
-                    "original_image": image # Store for potential screenshot generation later
-                })
-            else:
-                print(f"Warning: Could not read frame {frame_num} from {filename}")
-        
-        cap.release()
-        if material_descriptions:
-            MATERIAL_DESCRIPTIONS_CACHE[filename] = {data["time"]: data for data in material_descriptions}
-            print(f"Loaded {len(material_descriptions)} keyframe descriptions for {filename}.")
+        descriptions_data = database.get_descriptions_by_filename(filename)
+        if descriptions_data:
+            MATERIAL_DESCRIPTIONS_CACHE[filename] = {data['time']: data for data in descriptions_data}
+            print(f"Loaded {len(descriptions_data)} descriptions for {filename} from database.")
         else:
-            print(f"Warning: No descriptions generated for {filename}")
+            print(f"Warning: No descriptions found in database for {filename}. Consider processing it first.")
 
     end_time = time.time()
     print(f"Material description cache built in {end_time - start_time:.2f} seconds.")
@@ -209,7 +162,6 @@ def find_matching_ad_segments(recorded_video_path: str):
                     "similarity": match_data["similarity"],
                     "recorded_frame_image": match_data["recorded_frame_image"],
                     "recorded_frame_description": match_data["recorded_frame_description"],
-                    "material_frame_image": material_frame_data["original_image"],
                     "material_frame_description": material_frame_data["description"]
                 })
     
@@ -246,7 +198,10 @@ def find_matching_ad_segments(recorded_video_path: str):
         try:
             os.makedirs(config.SCREENSHOTS_DIR, exist_ok=True)
             match["recorded_frame_image"].save(recorded_ss_path)
-            match["material_frame_image"].save(material_ss_path)
+            
+            # Extract material frame on-demand
+            material_video_path = os.path.join(config.MATERIALS_DIR, match["material_filename"])
+            video_processor.extract_frame_at_time(material_video_path, match["material_time"], material_ss_path)
             
             comparison_screenshots.append({
                 "recorded_frame_path": os.path.abspath(recorded_ss_path),

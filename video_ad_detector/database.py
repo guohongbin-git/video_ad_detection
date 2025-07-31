@@ -28,8 +28,39 @@ def init_db():
             FOREIGN KEY(material_id) REFERENCES materials(id)
         )
     """)
+    # Table for keyframe descriptions, linked to a material
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS keyframe_descriptions (
+            material_id INTEGER,
+            timestamp REAL,
+            description TEXT,
+            PRIMARY KEY (material_id, timestamp),
+            FOREIGN KEY(material_id) REFERENCES materials(id)
+        )
+    """)
     conn.commit()
     conn.close()
+
+def add_material(filename: str):
+    """
+    Adds a new material filename to the database.
+    """
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO materials (filename) VALUES (?)", (filename,))
+    conn.commit()
+    conn.close()
+
+def material_exists(filename: str) -> bool:
+    """
+    Checks if a material with the given filename already exists in the database.
+    """
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM materials WHERE filename = ?", (filename,))
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
 
 def save_material_features(filename: str, features_data: list[tuple[float, np.ndarray]]):
     """
@@ -85,3 +116,52 @@ def get_all_material_filenames() -> list[str]:
     rows = cursor.fetchall()
     conn.close()
     return [row[0] for row in rows]
+
+def save_material_descriptions(filename: str, descriptions_data: list[dict]):
+    """
+    Saves the semantic descriptions for each keyframe of a material video.
+    """
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT id FROM materials WHERE filename = ?", (filename,))
+    material_id_row = cursor.fetchone()
+    if not material_id_row:
+        print(f"Error: Material '{filename}' not found in database.")
+        conn.close()
+        return
+
+    material_id = material_id_row[0]
+
+    # Delete old descriptions to prevent duplicates on re-processing
+    cursor.execute("DELETE FROM keyframe_descriptions WHERE material_id = ?", (material_id,))
+
+    desc_to_insert = [
+        (material_id, data['time'], data['description'])
+        for data in descriptions_data
+    ]
+
+    cursor.executemany(
+        "INSERT INTO keyframe_descriptions (material_id, timestamp, description) VALUES (?, ?, ?)",
+        desc_to_insert
+    )
+    
+    conn.commit()
+    conn.close()
+
+def get_descriptions_by_filename(filename: str) -> list[dict]:
+    """
+    Retrieves all keyframe descriptions for a specific material filename.
+    """
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT kd.timestamp, kd.description
+        FROM keyframe_descriptions kd
+        JOIN materials m ON kd.material_id = m.id
+        WHERE m.filename = ?
+        ORDER BY kd.timestamp
+    """, (filename,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"time": row[0], "description": row[1]} for row in rows]

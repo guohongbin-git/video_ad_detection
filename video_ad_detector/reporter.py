@@ -7,11 +7,25 @@ from reportlab.lib import colors
 import os
 import time
 
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
 from . import config
+
+# --- Register the Chinese font ---
+FONT_NAME = "SourceHanSans"
+FONT_PATH = os.path.join(config.MATERIALS_DIR, "SourceHanSansSC-Regular.otf")
+
+if os.path.exists(FONT_PATH):
+    pdfmetrics.registerFont(TTFont(FONT_NAME, FONT_PATH))
+else:
+    print(f"WARNING: Font file not found at {FONT_PATH}. Chinese characters may not render correctly.")
+    FONT_NAME = "Helvetica" # Fallback to default
+
 
 def generate_report(report_data: dict):
     """
-    Creates a detailed PDF report with side-by-side comparison screenshots.
+    Creates a detailed PDF report with side-by-side comparison screenshots and semantic descriptions.
 
     Args:
         report_data (dict): A dictionary containing all necessary data for the report.
@@ -25,19 +39,23 @@ def generate_report(report_data: dict):
     story = []
 
     # --- Title ---
-    story.append(Paragraph("Video Ad Detection Report", styles['h1']))
+    styles['h1'].fontName = FONT_NAME
+    styles['h2'].fontName = FONT_NAME
+    styles['Normal'].fontName = FONT_NAME
+    story.append(Paragraph("视频广告检测报告", styles['h1']))
     story.append(Spacer(1, 0.2 * inch))
 
     # --- Summary Section ---
     story.append(Paragraph("<b>Summary of Findings</b>", styles['h2']))
     story.append(Spacer(1, 0.1 * inch))
 
-    summary_text = f""
-    f"<b>- Recorded Video:</b> {os.path.basename(recorded_video_path)}<br/>"
-    f"<b>- Best Match Ad Material:</b> {report_data['best_match_material_filename']}<br/>"
-    f"<b>- Highest Similarity Score:</b> {report_data['overall_similarity_score']:.2f}<br/>"
-    f"<b>- Source Material Duration:</b> {report_data['material_duration']:.2f} seconds<br/>"
-    f"<b>- Total Matched Duration in Video:</b> {report_data['total_matched_duration_in_recorded']:.2f} seconds"
+    summary_text = (
+        f"<b>- 被检测视频:</b> {os.path.basename(recorded_video_path)}<br/>"
+        f"<b>- 最佳匹配素材:</b> {report_data['best_match_material_filename']}<br/>"
+        f"<b>- 最高相似度分数:</b> {report_data['overall_similarity_score']:.2f}<br/>"
+        f"<b>- 源素材时长:</b> {report_data['material_duration']:.2f} 秒<br/>"
+        f"<b>- 视频中匹配总时长:</b> {report_data['total_matched_duration_in_recorded']:.2f} 秒"
+    )
     story.append(Paragraph(summary_text, styles['Normal']))
     story.append(Spacer(1, 0.2 * inch))
 
@@ -50,7 +68,7 @@ def generate_report(report_data: dict):
         story.append(Paragraph("No comparison screenshots were generated.", styles['Normal']))
     else:
         # Create a table for side-by-side image comparison
-        table_data = [["Recorded Video Frame", "Original Material Frame"]]
+        table_data = [["实拍视频帧", "原始素材帧"]]
         
         for item in screenshots:
             try:
@@ -58,12 +76,12 @@ def generate_report(report_data: dict):
                 img_recorded = Image(item["recorded_frame_path"], width=2.5*inch, height=1.5*inch, kind='proportional')
                 img_material = Image(item["material_frame_path"], width=2.5*inch, height=1.5*inch, kind='proportional')
                 
-                # Create timestamp paragraphs
-                ts_recorded = Paragraph(f"Time: {item['recorded_time']:.2f}s", styles['Normal'])
-                ts_material = Paragraph(f"Time: {item['material_time']:.2f}s", styles['Normal'])
+                # Create timestamp and description paragraphs
+                ts_desc_recorded = Paragraph(f"时间: {item['recorded_time']:.2f}s<br/>描述: {item['recorded_frame_description']}", styles['Normal'])
+                ts_desc_material = Paragraph(f"时间: {item['material_time']:.2f}s<br/>描述: {item['material_frame_description']}", styles['Normal'])
                 
-                # Add images and timestamps to the table row
-                table_data.append([[img_recorded, ts_recorded], [img_material, ts_material]])
+                # Add images and timestamps/descriptions to the table row
+                table_data.append([[img_recorded, ts_desc_recorded], [img_material, ts_desc_material]])
 
             except Exception as img_e:
                 print(f"Error processing image for PDF: {img_e}")
@@ -107,4 +125,6 @@ def generate_report(report_data: dict):
                 os.remove(screenshot_path)
             except OSError as e:
                 print(f"Error removing screenshot file {screenshot_path}: {e}")
+
+    return report_filename
 
