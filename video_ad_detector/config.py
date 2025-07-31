@@ -10,7 +10,7 @@ print(f"Using device: {DEVICE}")
 # LM Studio API Configuration
 LM_STUDIO_API_BASE = "http://localhost:1234/v1"
 # Model name for chat completions (e.g., google/gemma-3-4b-it)
-LM_STUDIO_CHAT_MODEL_NAME = "paligemma-3b-mix-448"
+LM_STUDIO_CHAT_MODEL_NAME = "gemma-3n-e2b-it-mlx"
 # Model name for embeddings (check your LM Studio setup for the correct name)
 LM_STUDIO_EMBEDDING_MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5" # Placeholder, user needs to verify
 
