@@ -1,14 +1,12 @@
-
 import os
-# Prevent TensorFlow and JAX from being imported by Hugging Face Transformers
-os.environ["TRANSFORMERS_NO_TF"] = "1"
-os.environ["TRANSFORMERS_NO_JAX"] = "1"
-
 import numpy as np
 from PIL import Image
-from transformers import AutoProcessor, Gemma3ForConditionalGeneration
-import torch
-import logging # Import logging module
+import logging
+import easyocr # Import EasyOCR
+import base64
+import io
+import openai
+import streamlit as st # Import streamlit for caching
 
 from . import config
 
@@ -23,89 +21,134 @@ logging.basicConfig(
     ]
 )
 
-import quanto
-import logging
-# --- Model and Processor Initialization ---
+# --- Component Initialization (Cached by Streamlit) ---
+@st.cache_resource
+def initialize_llm_client():
+    logging.info("Initializing LM Studio API client...")
+    try:
+        client = openai.OpenAI(base_url=config.LM_STUDIO_API_BASE, api_key="lm-studio") # Add a dummy API key
+        logging.info(f"LM Studio API client initialized with base URL: {config.LM_STUDIO_API_BASE}")
+        return client
+    except Exception as e:
+        logging.critical(f"CRITICAL ERROR DURING LM STUDIO CLIENT INITIALIZATION: {e}", exc_info=True)
+        return None
 
-processor = None
-model = None
-vision_encoder = None # This will hold the vision_tower
+@st.cache_resource
+def initialize_ocr_reader():
+    logging.info("Initializing EasyOCR reader...")
+    try:
+        use_gpu = False
+        try:
+            import torch
+            if torch.cuda.is_available():
+                use_gpu = True
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                use_gpu = True
+        except ImportError:
+            logging.warning("PyTorch not found, EasyOCR will run on CPU.")
 
-try:
-    logging.info("ATTEMPTING TO LOAD MODEL COMPONENTS...")
-    logging.info(f"Loading processor from: {config.GEMMA_MODEL_PATH}")
-    processor = AutoProcessor.from_pretrained(config.GEMMA_MODEL_PATH)
-    logging.info("Processor loaded.")
+        ocr_reader = easyocr.Reader(['ch_sim', 'en'], gpu=use_gpu)
+        logging.info(f"EasyOCR reader initialized. Using GPU: {use_gpu}")
+        return ocr_reader
+    except Exception as e:
+        logging.critical(f"CRITICAL ERROR DURING EASYOCR INITIALIZATION: {e}", exc_info=True)
+        return None
 
-    logging.info(f"Loading full multimodal model from: {config.GEMMA_MODEL_PATH}")
-    # Load the model in full precision first
-    model = Gemma3ForConditionalGeneration.from_pretrained(
-        config.GEMMA_MODEL_PATH,
-        torch_dtype=torch.float16 # Load in float16 to save memory before quantization
-    )
-    logging.info("Full multimodal model loaded in float16.")
+# Call the cached functions to get the initialized components
+client = initialize_llm_client()
+ocr_reader = initialize_ocr_reader()
 
-    # Quantize the model using quanto for MPS compatibility
-    logging.info("Quantizing model to int4 using quanto...")
-    quanto.quantize(model, weights=quanto.qint4, activations=None)
-    logging.info("Model quantization complete.")
-
-    # Move the quantized model to the correct device
-    model = model.to(config.DEVICE)
-    logging.info(f"Quantized model moved to device: {config.DEVICE}")
-
-    if model:
-        vision_encoder = model.vision_tower
-    if vision_encoder is None:
-        raise RuntimeError("Could not access the vision_tower from the loaded model. It might be missing or named differently.")
-    logging.info("Vision Tower successfully accessed.")
-
-    logging.info("MODEL COMPONENTS LOADED SUCCESSFULLY!")
-
-except Exception as e:
-    logging.critical(f"CRITICAL ERROR DURING MODEL LOADING: {e}", exc_info=True) # Log with full traceback
-    logging.error("Please check your model path, download, and environment setup. See model_loading_error.log for details.")
-    processor, model, vision_encoder = None, None, None
-
-def extract_features(image: Image.Image) -> np.ndarray:
+def pil_to_base64(image: Image.Image) -> str:
     """
-    Extracts features from a single image frame using the model's Vision Tower.
+    Converts a PIL Image to a Base64 encoded string.
     """
-    if not vision_encoder or not processor:
-        logging.warning("Vision Tower or Processor is not loaded. Cannot extract features.")
-        return np.random.rand(1, 3072).astype(np.float32)
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG") # Use JPEG for efficiency
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+def generate_description(image: Image.Image, perform_ocr: bool = True) -> str:
+    """
+    Generates a textual description of an image using the LM Studio chat completion API.
+    Conditionally performs OCR internally and includes the detected text in the prompt.
+    """
+    if not client:
+        logging.warning("LM Studio client is not loaded. Cannot generate description.")
+        return "Error: Model not loaded."
+
+    ocr_text_combined = ""
+    if perform_ocr:
+        if not ocr_reader:
+            logging.warning("OCR Reader is not loaded. Cannot perform OCR.")
+        else:
+            try:
+                logging.info("Performing OCR on the image...")
+                image_np = np.array(image)
+                if image_np.shape[2] == 4:
+                    image_np = image_np[:, :, :3] # Convert RGBA to RGB
+
+                ocr_results = ocr_reader.readtext(image_np)
+                detected_texts = [res[1] for res in ocr_results]
+                ocr_text_combined = " ".join(detected_texts)
+                logging.info(f"OCR Detected Text: {ocr_text_combined}")
+            except Exception as e:
+                logging.error(f"An error occurred during OCR: {e}", exc_info=True)
+                ocr_text_combined = ""
 
     try:
-        # CRITICAL FIX: Use processor.image_processor for image-only input
-        inputs = processor.image_processor(images=image, return_tensors="pt").to(vision_encoder.device)
-        logging.debug(f"Inputs prepared using image_processor. Device: {vision_encoder.device}")
+        # Convert image to Base64
+        base64_image = pil_to_base64(image)
 
-        with torch.no_grad():
-            # The vision_encoder (vision_tower) expects pixel_values directly
-            outputs = vision_encoder(pixel_values=inputs["pixel_values"])
+        # Construct the prompt with OCR text for the LLM
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "请根据图片内容生成详细描述。"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                    }
+                ]
+            }
+        ]
+
+        if ocr_text_combined:
+            messages[0]["content"].append({
+                "type": "text", 
+                "text": f"作为参考，图片中识别出的文字是：“{ocr_text_combined}”。请在你的描述中自然地结合这些文字信息。"
+            })
+
+        logging.info(f"Sending chat completion request to LM Studio for model: {config.LM_STUDIO_CHAT_MODEL_NAME}")
+        chat_completion = client.chat.completions.create(
+            model=config.LM_STUDIO_CHAT_MODEL_NAME,
+            messages=messages,
+            max_tokens=200
+        )
         
-        logging.debug(f"Vision encoder outputs type: {type(outputs)}")
-        logging.debug(f"Vision encoder outputs: {outputs}")
-
-        if outputs is None:
-            logging.error("Vision encoder returned None output. This is unexpected.")
-            raise ValueError("Vision encoder returned None output.")
-
-        # The vision encoder output is an object (BaseModelOutputWithPooling), not a tuple.
-        # We access the `last_hidden_state` attribute directly.
-        last_hidden_state = outputs.last_hidden_state
-        logging.debug(f"Extracted last_hidden_state. Type: {type(last_hidden_state)}")
-
-        if last_hidden_state is None:
-            logging.error("Could not retrieve last_hidden_state from the vision tower's output.")
-            raise ValueError("Could not retrieve last_hidden_state from the vision tower's output.")
-        
-        # CRITICAL FIX: Convert to float32 before converting to numpy
-        embedding = torch.mean(last_hidden_state, dim=1).cpu().float().numpy()
-        logging.debug(f"Feature extraction successful. Embedding shape: {embedding.shape}")
-        return embedding.astype(np.float32)
+        description = chat_completion.choices[0].message.content
+        logging.info(f"Generated Description: {description}")
+        return description
 
     except Exception as e:
-        logging.error(f"An error occurred during feature extraction: {e}", exc_info=True) # Add exc_info=True
-        logging.error("Returning a random feature vector as a fallback.")
-        return np.random.rand(1, 3072).astype(np.float32)
+        logging.error(f"An error occurred during description generation via LM Studio API: {e}", exc_info=True)
+        return "Error: Could not generate description."
+
+def get_text_embedding(text: str) -> np.ndarray:
+    """
+    Generates a text embedding for the given text using the LM Studio embeddings API.
+    """
+    if not client:
+        logging.warning("LM Studio client is not loaded. Cannot generate embedding.")
+        return np.array([])
+    try:
+        logging.info(f"Sending embedding request to LM Studio for model: {config.LM_STUDIO_EMBEDDING_MODEL_NAME}")
+        response = client.embeddings.create(
+            model=config.LM_STUDIO_EMBEDDING_MODEL_NAME,
+            input=[text]
+        )
+        embedding = np.array(response.data[0].embedding).astype(np.float32)
+        logging.info(f"Text embedding generated. Shape: {embedding.shape}")
+        return embedding
+    except Exception as e:
+        logging.error(f"An error occurred during text embedding generation via LM Studio API: {e}", exc_info=True)
+        return np.array([])

@@ -109,9 +109,9 @@ def process_material_video(video_path: str, progress_callback=None):
         middle_frame_num = total_frames // 2
         middle_time = middle_frame_num / fps
         keyframes_to_process.append((middle_frame_num, middle_time))
-    # Last frame
+    # Last frame (or 25th frame from the end, as requested)
     if total_frames > 1:
-        last_frame_num = total_frames - 1
+        last_frame_num = max(0, total_frames - 25)
         last_time = last_frame_num / fps
         keyframes_to_process.append((last_frame_num, last_time))
 
