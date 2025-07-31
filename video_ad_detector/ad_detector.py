@@ -37,7 +37,7 @@ def _load_material_descriptions(filenames_to_load: list[str] | None = None):
             # Store orientation along with descriptions in the cache
             MATERIAL_DESCRIPTIONS_CACHE[filename] = {
                 "orientation": orientation,
-                "keyframes": {data['time']: data for data in descriptions_data}
+                "keyframes": {int(data['time'] * 1000): data for data in descriptions_data}
             }
             print(f"Loaded {len(descriptions_data)} descriptions for {filename} (Orientation: {orientation}) from database.")
         else:
@@ -48,7 +48,7 @@ def _load_material_descriptions(filenames_to_load: list[str] | None = None):
 
 
 
-def find_matching_ad_segments(recorded_video_path: str):
+def find_matching_ad_segments(recorded_video_path: str, recorded_frames_data: list[dict]):
     """
     Analyzes a recorded video by comparing its frames' semantic descriptions
     against pre-cached keyframe descriptions from material videos.
@@ -66,8 +66,8 @@ def find_matching_ad_segments(recorded_video_path: str):
     best_matches_per_material_keyframe = {}
     for material_filename, material_descriptions_dict in MATERIAL_DESCRIPTIONS_CACHE.items():
         best_matches_per_material_keyframe[material_filename] = {}
-        for material_time, material_frame_data in material_descriptions_dict.items():
-            best_matches_per_material_keyframe[material_filename][material_time] = {
+        for material_time, material_frame_data in material_descriptions_dict["keyframes"].items():
+            best_matches_per_material_keyframe[material_filename][int(material_time * 1000)] = {
                 "similarity": -1.0, # Initialize with a very low similarity
                 "recorded_time": None,
                 "recorded_frame_image": None,
@@ -75,8 +75,8 @@ def find_matching_ad_segments(recorded_video_path: str):
             }
 
     # 2. Process the recorded video to get representative frames
-    recorded_frames_data = video_processor.get_representative_recorded_frames(recorded_video_path)
-    if not recorded_frames_data:
+    recorded_frames_dict = {int(frame_data["time"] * 1000): frame_data for frame_data in recorded_frames_data}
+    if not recorded_frames_dict:
         print("No representative frames extracted from recorded video. Cannot perform detection.")
         return None
 
@@ -84,8 +84,8 @@ def find_matching_ad_segments(recorded_video_path: str):
     matched_recorded_times = set() # To count unique matched seconds for total duration
 
     print("Starting semantic analysis of recorded video...")
-    for recorded_frame_data in recorded_frames_data:
-        current_recorded_time = recorded_frame_data["time"]
+    for recorded_time_ms, recorded_frame_data in recorded_frames_dict.items():
+        current_recorded_time = recorded_time_ms / 1000.0 # Convert back to seconds for calculations
         image_for_description = recorded_frame_data["image"]
         prelim_recorded_frame_description = recorded_frame_data["description"]
 
@@ -106,13 +106,13 @@ def find_matching_ad_segments(recorded_video_path: str):
                     final_recorded_frame_description = feature_extractor.generate_description(image_for_description, perform_ocr=True)
                     final_similarity = feature_extractor.calculate_semantic_similarity(final_recorded_frame_description, material_frame_data["description"])
                     
-                    if final_similarity >= best_matches_per_material_keyframe[material_filename][material_time]["similarity"]:
-                        best_matches_per_material_keyframe[material_filename][material_time] = {
-                            "similarity": final_similarity,
-                            "recorded_time": current_recorded_time,
-                            "recorded_frame_image": image_for_description,
-                            "recorded_frame_description": final_recorded_frame_description
-                        }
+                    if final_similarity >= best_matches_per_material_keyframe[material_filename][int(material_time * 1000)]["similarity"]:
+                        best_matches_per_material_keyframe[material_filename][int(material_time * 1000)] = {
+                                "similarity": final_similarity,
+                                "recorded_time": current_recorded_time,
+                                "recorded_frame_image": image_for_description,
+                                "recorded_frame_description": final_recorded_frame_description
+                            }
                         matched_recorded_times.add(current_recorded_time) # Add to set for total duration
 
     # Calculate total matched duration
@@ -133,13 +133,14 @@ def find_matching_ad_segments(recorded_video_path: str):
 
     all_best_matches = []
     for material_filename, keyframe_matches in best_matches_per_material_keyframe.items():
-        for material_time, match_data in keyframe_matches.items():
+        for material_time_ms, match_data in keyframe_matches.items():
+            material_time = material_time_ms / 1000.0 # Convert back to seconds
             if match_data["recorded_time"] is not None: # Only include if a match was found
-                material_frame_data = MATERIAL_DESCRIPTIONS_CACHE[material_filename][material_time]
+                material_frame_data = MATERIAL_DESCRIPTIONS_CACHE[material_filename]["keyframes"][material_time_ms]
                 all_best_matches.append({
                     "recorded_time": match_data["recorded_time"],
                     "material_filename": material_filename,
-                    "material_time": material_time,
+                    "material_time": material_time, # Already in seconds
                     "similarity": match_data["similarity"],
                     "recorded_frame_image": match_data["recorded_frame_image"],
                     "recorded_frame_description": match_data["recorded_frame_description"],

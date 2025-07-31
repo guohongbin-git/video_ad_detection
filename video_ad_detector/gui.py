@@ -30,6 +30,8 @@ def main():
         st.session_state.report_data = None
     if 'features_loaded' not in st.session_state:
         st.session_state.features_loaded = False
+    if 'cached_recorded_frames' not in st.session_state:
+        st.session_state.cached_recorded_frames = {}
 
     # --- Initialize Database and Directories ---
     database.init_db()
@@ -55,8 +57,8 @@ def main():
     else:
         selected_materials = st.sidebar.multiselect(
             "Select materials to use for detection:",
-            options=available_materials,
-            default=available_materials
+            options=[f for f, o in available_materials_data],
+            default=[f for f, o in available_materials_data]
         )
         if st.sidebar.button("Load Selected Descriptions"):
             if not selected_materials:
@@ -82,12 +84,29 @@ def main():
     if st.sidebar.button("Detect Ad", disabled=not st.session_state.features_loaded or not recorded_video_file):
         st.session_state.report_data = None # Clear previous results
         st.info(f"Analyzing video: {recorded_video_file.name}. Please wait...")
-        temp_video_path = save_uploaded_file(recorded_video_file)
         
-        if temp_video_path:
+        video_id = recorded_video_file.name # Use filename as a simple cache key
+
+        if video_id in st.session_state.cached_recorded_frames:
+            recorded_frames_data = st.session_state.cached_recorded_frames[video_id]
+            st.success(f"Using cached data for {recorded_video_file.name}.")
+        else:
+            temp_video_path = save_uploaded_file(recorded_video_file)
+            if temp_video_path:
+                with st.spinner("Processing video frames..."):
+                    recorded_frames_data = video_processor.get_representative_recorded_frames(temp_video_path)
+                os.remove(temp_video_path)
+                st.session_state.cached_recorded_frames[video_id] = recorded_frames_data # Cache the processed data
+                st.success(f"Processed and cached data for {recorded_video_file.name}.")
+            else:
+                st.error("Failed to save uploaded video temporarily.")
+                return
+
+        if recorded_frames_data:
             with st.spinner("Performing frame-by-frame analysis..."):
-                st.session_state.report_data = ad_detector.find_matching_ad_segments(temp_video_path)
-            os.remove(temp_video_path)
+                st.session_state.report_data = ad_detector.find_matching_ad_segments(recorded_video_path, recorded_frames_data)
+        else:
+            st.error("No frames extracted from the recorded video. Cannot perform detection.")
 
     # --- 3. Add New Ad Material (in an expander) ---
     with st.sidebar.expander("Add New Ad Material"):
