@@ -16,7 +16,7 @@ from . import config
 FONT_NAME = "SourceHanSans"
 # FONT_PATH should point to where the font file actually is.
 # We assume it's in a 'materials' subdirectory next to the source code files.
-FONT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), 'materials', 'SourceHanSansSC-Regular.otf'))
+FONT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), 'materials', 'SourceHanSansSC-Regular.ttf'))
 
 if os.path.exists(FONT_PATH):
     pdfmetrics.registerFont(TTFont(FONT_NAME, FONT_PATH))

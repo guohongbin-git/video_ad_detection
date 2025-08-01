@@ -26,12 +26,10 @@ def main():
     st.title("📹 Video Ad Detector")
 
     # --- Initialize Session State ---
-    if 'report_data' not in st.session_state:
-        st.session_state.report_data = None
+    if 'report_data_list' not in st.session_state:
+        st.session_state.report_data_list = []
     if 'features_loaded' not in st.session_state:
         st.session_state.features_loaded = False
-    if 'cached_recorded_frames' not in st.session_state:
-        st.session_state.cached_recorded_frames = {}
 
     # --- Initialize Database and Directories ---
     database.init_db()
@@ -45,9 +43,8 @@ def main():
     # --- 1. Load Description Library ---
     st.sidebar.header("1. Load Description Library")
     try:
-        # get_all_materials now returns (filename, orientation) tuples
         available_materials_data = database.get_all_materials()
-        available_materials = [f for f, o in available_materials_data] # Extract just filenames for multiselect options
+        available_materials = [f for f, o in available_materials_data]
     except Exception as e:
         st.sidebar.error(f"DB Error: {e}")
         available_materials = []
@@ -66,47 +63,46 @@ def main():
             else:
                 with st.spinner(f"Loading descriptions for {len(selected_materials)} material(s)..."):
                     ad_detector._load_material_descriptions(filenames_to_load=selected_materials)
-                    st.session_state.features_loaded = True # Keep the name for now, but it means descriptions are loaded
+                    st.session_state.features_loaded = True
                     st.sidebar.success("✅ Descriptions loaded and ready.")
 
-    # --- 2. Detect Ad in a Video ---
-    st.sidebar.header("2. Detect Ad in Video")
+    # --- 2. Detect Ad in Videos ---
+    st.sidebar.header("2. Detect Ad in Videos")
     if not st.session_state.features_loaded:
         st.sidebar.info("Load a description library before detection.")
 
-    recorded_video_file = st.sidebar.file_uploader(
-        "Upload a video to check for ads",
+    recorded_video_files = st.sidebar.file_uploader(
+        "Upload videos to check for ads",
         type=["mp4", "mov", "avi"],
         key="recorded_uploader",
+        accept_multiple_files=True,
         disabled=not st.session_state.features_loaded
     )
 
-    if st.sidebar.button("Detect Ad", disabled=not st.session_state.features_loaded or not recorded_video_file):
-        st.session_state.report_data = None # Clear previous results
-        st.info(f"Analyzing video: {recorded_video_file.name}. Please wait...")
-        
-        video_id = recorded_video_file.name # Use filename as a simple cache key
+    if st.sidebar.button("Detect Ads", disabled=not st.session_state.features_loaded or not recorded_video_files):
+        st.session_state.report_data_list = [] # Clear previous results
+        for recorded_video_file in recorded_video_files:
+            st.info(f"Analyzing video: {recorded_video_file.name}. Please wait...")
+            temp_video_path = None
+            try:
+                temp_video_path = save_uploaded_file(recorded_video_file)
+                if not temp_video_path:
+                    st.error(f"Failed to save uploaded video temporarily: {recorded_video_file.name}")
+                    continue
 
-        if video_id in st.session_state.cached_recorded_frames:
-            recorded_frames_data = st.session_state.cached_recorded_frames[video_id]
-            st.success(f"Using cached data for {recorded_video_file.name}.")
-        else:
-            temp_video_path = save_uploaded_file(recorded_video_file)
-            if temp_video_path:
-                with st.spinner("Processing video frames..."):
+                with st.spinner(f"Processing video frames for {recorded_video_file.name}..."):
                     recorded_frames_data = video_processor.get_representative_recorded_frames(temp_video_path)
-                os.remove(temp_video_path)
-                st.session_state.cached_recorded_frames[video_id] = recorded_frames_data # Cache the processed data
-                st.success(f"Processed and cached data for {recorded_video_file.name}.")
-            else:
-                st.error("Failed to save uploaded video temporarily.")
-                return
-
-        if recorded_frames_data:
-            with st.spinner("Performing frame-by-frame analysis..."):
-                st.session_state.report_data = ad_detector.find_matching_ad_segments(recorded_video_path, recorded_frames_data)
-        else:
-            st.error("No frames extracted from the recorded video. Cannot perform detection.")
+                
+                if recorded_frames_data:
+                    with st.spinner(f"Performing analysis for {recorded_video_file.name}..."):
+                        report_data = ad_detector.find_matching_ad_segments(temp_video_path, recorded_frames_data)
+                        if report_data:
+                            st.session_state.report_data_list.append(report_data)
+                else:
+                    st.error(f"No frames extracted from {recorded_video_file.name}. Cannot perform detection.")
+            finally:
+                if temp_video_path and os.path.exists(temp_video_path):
+                    os.remove(temp_video_path)
 
     # --- 3. Add New Ad Material (in an expander) ---
     with st.sidebar.expander("Add New Ad Material"):
@@ -136,7 +132,6 @@ def main():
                         destination_path = os.path.join(config.MATERIALS_DIR, material_file.name)
                         try:
                             shutil.copyfile(temp_material_path, destination_path)
-                            # Process material video to generate descriptions and add to DB
                             video_processor.process_material_video(destination_path, progress_callback=update_progress)
                             st.success(f"Successfully generated descriptions for {material_file.name}")
                             processed_count += 1
@@ -151,47 +146,48 @@ def main():
                     st.rerun()
 
     # --- Main Area for Displaying Results ---
-    if st.session_state.report_data:
-        data = st.session_state.report_data
-        st.header("Detection Results Preview")
+    if st.session_state.report_data_list:
+        for i, data in enumerate(st.session_state.report_data_list):
+            st.header(f"Detection Results for {os.path.basename(data['recorded_video_path'])}")
 
-        st.subheader("Summary")
-        st.markdown(
-            f"""- **Best Match Ad Material:** `{data['best_match_material_filename']}`
+            st.subheader("Summary")
+            st.markdown(
+                f"""- **Best Match Ad Material:** `{data['best_match_material_filename']}`
 - **Highest Similarity Score:** `{data['overall_similarity_score']:.2f}`
 - **Source Material Duration:** `{data['material_duration']:.2f} seconds`
 - **Total Matched Duration in Video:** `{data['total_matched_duration_in_recorded']:.2f} seconds`"""
-        )
+            )
 
-        st.subheader("Comparative Evidence")
-        for item in data["comparison_screenshots"]:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.image(item["recorded_frame_path"], caption=f"Recorded Video at {item['recorded_time']:.2f}s", use_column_width=True)
-            with col2:
-                st.image(item["material_frame_path"], caption=f"Material Video at {item['material_time']:.2f}s", use_column_width=True)
-            st.divider()
+            st.subheader("Comparative Evidence")
+            for item in data["comparison_screenshots"]:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.image(item["recorded_frame_path"], caption=f"Recorded Video at {item['recorded_time']:.2f}s", use_column_width=True)
+                with col2:
+                    st.image(item["material_frame_path"], caption=f"Material Video at {item['material_time']:.2f}s", use_column_width=True)
+                st.divider()
 
-        # --- Confirmation and PDF Generation ---
-        st.header("Generate Report")
-        if st.button("Confirm and Generate PDF Report"):
-            with st.spinner("Generating PDF..."):
-                report_filename = reporter.generate_report(data)
-                if report_filename:
-                    report_path = os.path.join(config.REPORTS_DIR, report_filename)
-                    st.success(f"Report successfully generated!")
-                    with open(report_path, "rb") as f:
-                        st.download_button(
-                            label="📥 Download Report",
-                            data=f.read(),
-                            file_name=os.path.basename(report_path),
-                            mime="application/pdf"
-                        )
-                else:
-                    st.error("Failed to generate report.")
+            # --- Confirmation and PDF Generation ---
+            st.header("Generate Report")
+            if st.button(f"Confirm and Generate PDF Report for {os.path.basename(data['recorded_video_path'])}", key=f"pdf_{i}"):
+                with st.spinner("Generating PDF..."):
+                    report_filename = reporter.generate_report(data)
+                    if report_filename:
+                        report_path = os.path.join(config.REPORTS_DIR, report_filename)
+                        st.success(f"Report successfully generated for {os.path.basename(data['recorded_video_path'])}!")
+                        with open(report_path, "rb") as f:
+                            st.download_button(
+                                label="📥 Download Report",
+                                data=f.read(),
+                                file_name=os.path.basename(report_path),
+                                mime="application/pdf",
+                                key=f"download_{i}"
+                            )
+                    else:
+                        st.error(f"Failed to generate report for {os.path.basename(data['recorded_video_path'])}.")
 
-    elif recorded_video_file and st.session_state.get('report_data', True) is None: # Check if detection was run but found nothing
-         st.info("No matching ad content was found in the video.")
+    elif recorded_video_files and not st.session_state.report_data_list:
+         st.info("No matching ad content was found in any of the uploaded videos.")
 
 if __name__ == "__main__":
     main()

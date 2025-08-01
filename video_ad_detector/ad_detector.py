@@ -50,10 +50,8 @@ def _load_material_descriptions(filenames_to_load: list[str] | None = None):
 
 def find_matching_ad_segments(recorded_video_path: str, recorded_frames_data: list[dict]):
     """
-    Analyzes a recorded video by comparing its frames' semantic descriptions
+    Analyzes a recorded video by comparing its clustered frames' semantic descriptions
     against pre-cached keyframe descriptions from material videos.
-    For each material keyframe (first, middle, last), it finds the best matching
-    frame in the recorded video.
     """
     # 1. Ensure the material description cache is loaded
     _load_material_descriptions()
@@ -62,58 +60,45 @@ def find_matching_ad_segments(recorded_video_path: str, recorded_frames_data: li
         return None
 
     # Initialize best matches for each material keyframe
-    # Structure: {material_filename: {material_time: {recorded_time, similarity, recorded_frame_image, recorded_frame_description}}}
     best_matches_per_material_keyframe = {}
     for material_filename, material_descriptions_dict in MATERIAL_DESCRIPTIONS_CACHE.items():
         best_matches_per_material_keyframe[material_filename] = {}
         for material_time, material_frame_data in material_descriptions_dict["keyframes"].items():
             best_matches_per_material_keyframe[material_filename][int(material_time * 1000)] = {
-                "similarity": -1.0, # Initialize with a very low similarity
+                "similarity": -1.0,
                 "recorded_time": None,
                 "recorded_frame_image": None,
                 "recorded_frame_description": None
             }
 
-    # 2. Process the recorded video to get representative frames
-    recorded_frames_dict = {int(frame_data["time"] * 1000): frame_data for frame_data in recorded_frames_data}
-    if not recorded_frames_dict:
+    # 2. Use the pre-processed (clustered) recorded frames data
+    if not recorded_frames_data:
         print("No representative frames extracted from recorded video. Cannot perform detection.")
         return None
 
-    total_matched_duration_in_recorded = 0.0
-    matched_recorded_times = set() # To count unique matched seconds for total duration
+    matched_recorded_times = set()
 
     print("Starting semantic analysis of recorded video...")
-    for recorded_time_ms, recorded_frame_data in recorded_frames_dict.items():
-        current_recorded_time = recorded_time_ms / 1000.0 # Convert back to seconds for calculations
+    for recorded_frame_data in recorded_frames_data:
+        current_recorded_time = recorded_frame_data["time"]
         image_for_description = recorded_frame_data["image"]
-        prelim_recorded_frame_description = recorded_frame_data["description"]
+        recorded_frame_description = recorded_frame_data["description"]
 
-        # Compare with all material keyframes for preliminary similarity
+        # Compare with all material keyframes
         for material_filename, material_data in MATERIAL_DESCRIPTIONS_CACHE.items():
             material_descriptions_dict = material_data["keyframes"]
-            material_orientation = material_data["orientation"]
-
-            # No need to call detect_video_playback_area or generate description here again
-            # as it's already done in get_representative_recorded_frames
 
             for material_time, material_frame_data in material_descriptions_dict.items():
-                prelim_similarity = feature_extractor.calculate_semantic_similarity(prelim_recorded_frame_description, material_frame_data["description"])
+                similarity = feature_extractor.calculate_semantic_similarity(recorded_frame_description, material_frame_data["description"])
                 
-                if prelim_similarity >= config.PRELIMINARY_SIMILARITY_THRESHOLD:
-                    # Stage 2: If preliminary match, generate full description with OCR for the recorded frame
-                    # This part still needs to be done here as prelim_recorded_frame_description might not have OCR
-                    final_recorded_frame_description = feature_extractor.generate_description(image_for_description, perform_ocr=True)
-                    final_similarity = feature_extractor.calculate_semantic_similarity(final_recorded_frame_description, material_frame_data["description"])
-                    
-                    if final_similarity >= best_matches_per_material_keyframe[material_filename][int(material_time * 1000)]["similarity"]:
-                        best_matches_per_material_keyframe[material_filename][int(material_time * 1000)] = {
-                                "similarity": final_similarity,
-                                "recorded_time": current_recorded_time,
-                                "recorded_frame_image": image_for_description,
-                                "recorded_frame_description": final_recorded_frame_description
-                            }
-                        matched_recorded_times.add(current_recorded_time) # Add to set for total duration
+                if similarity >= config.PRELIMINARY_SIMILARITY_THRESHOLD and similarity > best_matches_per_material_keyframe[material_filename][int(material_time * 1000)]["similarity"]:
+                    best_matches_per_material_keyframe[material_filename][int(material_time * 1000)] = {
+                            "similarity": similarity,
+                            "recorded_time": current_recorded_time,
+                            "recorded_frame_image": image_for_description,
+                            "recorded_frame_description": recorded_frame_description
+                        }
+                    matched_recorded_times.add(current_recorded_time)
 
     # Calculate total matched duration
     # This needs to be based on the original video's FPS, not just count of representative frames

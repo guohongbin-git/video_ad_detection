@@ -2,12 +2,12 @@
 torch
 torchvision
 torchaudio
-transformers
 opencv-python-headless
 numpy
 scikit-learn
-accelerate # Added for device_map="auto"
-quanto # For model quantization on MPS
+easyocr # Added for OCR capabilities
+openai # Added for LM Studio API interaction
+imagehash # Added for perceptual hashing
 
 # GUI Frameworks (choose one or more)
 pyqt5

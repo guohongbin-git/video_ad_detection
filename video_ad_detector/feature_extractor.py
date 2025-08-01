@@ -2,7 +2,6 @@ import os
 import numpy as np
 from PIL import Image
 import logging
-import easyocr # Import EasyOCR
 import base64
 import io
 import openai
@@ -33,30 +32,8 @@ def initialize_llm_client():
         logging.critical(f"CRITICAL ERROR DURING LM STUDIO CLIENT INITIALIZATION: {e}", exc_info=True)
         return None
 
-@st.cache_resource
-def initialize_ocr_reader():
-    logging.info("Initializing EasyOCR reader...")
-    try:
-        use_gpu = False
-        try:
-            import torch
-            if torch.cuda.is_available():
-                use_gpu = True
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                use_gpu = True
-        except ImportError:
-            logging.warning("PyTorch not found, EasyOCR will run on CPU.")
-
-        ocr_reader = easyocr.Reader(['ch_sim', 'en'], gpu=use_gpu)
-        logging.info(f"EasyOCR reader initialized. Using GPU: {use_gpu}")
-        return ocr_reader
-    except Exception as e:
-        logging.critical(f"CRITICAL ERROR DURING EASYOCR INITIALIZATION: {e}", exc_info=True)
-        return None
-
 # Call the cached functions to get the initialized components
 client = initialize_llm_client()
-ocr_reader = initialize_ocr_reader()
 
 def pil_to_base64(image: Image.Image) -> str:
     """
@@ -66,44 +43,24 @@ def pil_to_base64(image: Image.Image) -> str:
     image.save(buffered, format="JPEG") # Use JPEG for efficiency
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-def generate_description(image: Image.Image, perform_ocr: bool = True) -> str:
+def generate_description(image: Image.Image) -> str:
     """
     Generates a textual description of an image using the LM Studio chat completion API.
-    Conditionally performs OCR internally and includes the detected text in the prompt.
     """
     if not client:
         logging.warning("LM Studio client is not loaded. Cannot generate description.")
         return "Error: Model not loaded."
 
-    ocr_text_combined = ""
-    if perform_ocr:
-        if not ocr_reader:
-            logging.warning("OCR Reader is not loaded. Cannot perform OCR.")
-        else:
-            try:
-                logging.info("Performing OCR on the image...")
-                image_np = np.array(image)
-                if image_np.shape[2] == 4:
-                    image_np = image_np[:, :, :3] # Convert RGBA to RGB
-
-                ocr_results = ocr_reader.readtext(image_np)
-                detected_texts = [res[1] for res in ocr_results]
-                ocr_text_combined = " ".join(detected_texts)
-                logging.info(f"OCR Detected Text: {ocr_text_combined}")
-            except Exception as e:
-                logging.error(f"An error occurred during OCR: {e}", exc_info=True)
-                ocr_text_combined = ""
-
     try:
         # Convert image to Base64
         base64_image = pil_to_base64(image)
 
-        # Construct the prompt with OCR text for the LLM
+        # Construct the prompt for the LLM
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "请根据图片内容生成详细描述。"},
+                    {"type": "text", "text": "请详细描述图片内容。"},
                     {
                         "type": "image_url",
                         "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
@@ -111,12 +68,6 @@ def generate_description(image: Image.Image, perform_ocr: bool = True) -> str:
                 ]
             }
         ]
-
-        if ocr_text_combined:
-            messages[0]["content"].append({
-                "type": "text", 
-                "text": f"作为参考，图片中识别出的文字是：“{ocr_text_combined}”。请在你的描述中自然地结合这些文字信息。"
-            })
 
         logging.info(f"Sending chat completion request to LM Studio for model: {config.LM_STUDIO_CHAT_MODEL_NAME}")
         chat_completion = client.chat.completions.create(
@@ -169,3 +120,31 @@ def calculate_semantic_similarity(desc1: str, desc2: str) -> float:
     # Reshape for cosine_similarity: (1, n_features)
     from sklearn.metrics.pairwise import cosine_similarity # Import here to avoid circular dependency
     return cosine_similarity(embedding1.reshape(1, -1), embedding2.reshape(1, -1))[0][0]
+
+
+def get_all_keyframes_data(video_path: str, frame_indices: list[int]) -> list[dict]:
+    """
+    Extracts keyframes, generates descriptions and embeddings for them.
+    """
+    frames_data = []
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Error: Cannot open video file {video_path}")
+        return frames_data
+
+    for frame_index in frame_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ret, frame = cap.read()
+        if ret:
+            frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            description = generate_description(frame_pil) # OCR is no longer performed
+            embedding = get_text_embedding(description)
+            
+            frames_data.append({
+                "frame_index": frame_index,
+                "description": description,
+                "embedding": embedding.tobytes() # Store embedding as bytes
+            })
+    
+    cap.release()
+    return frames_data

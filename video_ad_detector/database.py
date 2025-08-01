@@ -33,7 +33,7 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS keyframe_descriptions (
             material_id INTEGER,
-            timestamp REAL,
+            timestamp INTEGER,
             description TEXT,
             PRIMARY KEY (material_id, timestamp),
             FOREIGN KEY(material_id) REFERENCES materials(id)
@@ -138,7 +138,7 @@ def save_material_descriptions(filename: str, descriptions_data: list[dict]):
     cursor.execute("DELETE FROM keyframe_descriptions WHERE material_id = ?", (material_id,))
 
     desc_to_insert = [
-        (material_id, data['time'], data['description'])
+        (material_id, int(data['time'] * 1000), data['description'])
         for data in descriptions_data
     ]
 
@@ -165,4 +165,4 @@ def get_descriptions_by_filename(filename: str) -> list[dict]:
     """, (filename,))
     rows = cursor.fetchall()
     conn.close()
-    return [{"time": row[0], "description": row[1]} for row in rows]
+    return [{"time": row[0] / 1000.0, "description": row[1]} for row in rows]

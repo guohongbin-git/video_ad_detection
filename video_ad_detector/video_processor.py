@@ -2,7 +2,9 @@ import cv2
 import os
 from PIL import Image
 import numpy as np
-import logging # Import logging module
+import logging
+import imagehash
+from itertools import groupby
 from video_ad_detector import config
 from . import feature_extractor
 from . import database
@@ -232,19 +234,36 @@ def detect_video_playback_area(frame: np.ndarray, expected_orientation: str = "a
 
     return best_rect
 
-def get_representative_recorded_frames(recorded_video_path: str, progress_callback=None) -> list[dict]:
+def cluster_frames(frames_data: list[dict], hash_size: int = 8, similarity_threshold: int = 5) -> list[dict]:
     """
-    Processes a recorded video to extract representative frames based on semantic similarity.
-    It samples frames at a fixed interval (e.g., 1 frame per second) and then filters them
-    to keep only frames whose semantic description is significantly different from the previous one.
+    Clusters frames based on perceptual hash similarity.
 
     Args:
-        recorded_video_path (str): The path to the recorded video file.
-        progress_callback (callable, optional): A callback function to update progress.
+        frames_data (list[dict]): A list of dictionaries, each containing 'time' and 'image'.
+        hash_size (int): The size of the perceptual hash.
+        similarity_threshold (int): The maximum hash distance to be considered similar.
 
     Returns:
-        list[dict]: A list of dictionaries, each containing 'time', 'image', and 'description'
-                    for the representative frames.
+        list[dict]: A list of representative frames, one from each cluster.
+    """
+    for frame in frames_data:
+        frame['hash'] = imagehash.phash(frame['image'], hash_size=hash_size)
+
+    frames_data.sort(key=lambda x: str(x['hash']))
+
+    representative_frames = []
+    for hash_val, group in groupby(frames_data, key=lambda x: str(x['hash'])):
+        cluster = list(group)
+        # Get the first frame of the cluster as the representative
+        representative_frame = cluster[0]
+        # Add to the list of representatives
+        representative_frames.append(representative_frame)
+
+    return representative_frames
+
+def get_representative_recorded_frames(recorded_video_path: str, progress_callback=None) -> list[dict]:
+    """
+    Processes a recorded video to extract representative frames based on perceptual hash clustering.
     """
     cap = cv2.VideoCapture(recorded_video_path)
     if not cap.isOpened():
@@ -253,20 +272,19 @@ def get_representative_recorded_frames(recorded_video_path: str, progress_callba
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_interval = max(1, int(fps)) # Sample one frame per second
+    frame_interval = max(1, int(fps))
 
     if total_frames == 0 or fps == 0:
         print(f"Warning: No frames or zero FPS for {recorded_video_path}")
         cap.release()
         return []
 
-    representative_frames = []
-    previous_description = ""
+    frames_data = []
     frame_count = 0
-    processed_frames_count = 0
     num_frames_to_process = len(range(0, total_frames, frame_interval))
+    processed_frames_count = 0
 
-    print(f"Extracting representative frames from {recorded_video_path}...")
+    print(f"Extracting frames from {recorded_video_path}...")
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -275,56 +293,38 @@ def get_representative_recorded_frames(recorded_video_path: str, progress_callba
         if frame_count % frame_interval == 0:
             current_recorded_time = frame_count / fps
             
-            # Detect video playback area and crop the frame (auto orientation for recorded video)
             x, y, w, h = detect_video_playback_area(frame, expected_orientation="auto")
             cropped_frame = frame[y:y+h, x:x+w]
             
             if cropped_frame.size == 0:
-                print(f"Warning: Cropped frame is empty at time {current_recorded_time:.2f}s. Skipping.")
                 frame_count += 1
                 continue
 
-            # Save cropped frame for debugging if enabled
-            if config.SAVE_DEBUG_FRAMES:
-                debug_frame_path = os.path.join(config.DEBUG_FRAMES_DIR, f"recorded_frame_{int(current_recorded_time * 1000)}.jpg")
-                cv2.imwrite(debug_frame_path, cropped_frame)
-
-            image_for_description = Image.fromarray(cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2RGB))
-            
-            # Generate description for the current frame (with OCR)
-            current_description = feature_extractor.generate_description(image_for_description, perform_ocr=True)
-
-            # Compare with the previous representative frame's description
-            if not representative_frames or feature_extractor.calculate_semantic_similarity(previous_description, current_description) < config.REPRESENTATIVE_FRAME_SIMILARITY_THRESHOLD:
-                representative_frames.append({
-                    "time": current_recorded_time,
-                    "image": image_for_description,
-                    "description": current_description
-                })
-                previous_description = current_description
-                print(f"  - Added representative frame at {current_recorded_time:.2f}s. Desc: {current_description[:50]}...")
+            image = Image.fromarray(cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2RGB))
+            frames_data.append({"time": current_recorded_time, "image": image})
             
             processed_frames_count += 1
             if progress_callback:
-                progress_callback(processed_frames_count / num_frames_to_process, f"Processing recorded frame {processed_frames_count}/{num_frames_to_process}")
+                progress_callback(processed_frames_count / num_frames_to_process, f"Extracting frame {processed_frames_count}/{num_frames_to_process}")
 
         frame_count += 1
-
+    
     cap.release()
+
+    print(f"Clustering {len(frames_data)} extracted frames...")
+    representative_frames = cluster_frames(frames_data)
+    
+    print(f"Generating descriptions for {len(representative_frames)} representative frames...")
+    for i, frame in enumerate(representative_frames):
+        frame["description"] = feature_extractor.generate_description(frame["image"])
+        if progress_callback:
+            progress_callback((i + 1) / len(representative_frames), f"Generating description {i+1}/{len(representative_frames)}")
+
     print(f"Finished extracting representative frames. Total: {len(representative_frames)}")
     return representative_frames
 
 def process_recorded_video(video_path: str):
     """
     Processes a recorded video to detect ad content.
-
-    This is a placeholder for the full implementation which would include:
-    1. Screen detection
-    2. Screen content extraction and correction
-    3. Feature extraction from the screen content
-    4. Comparison with material features
-
-    For now, it will extract features from the entire frame.
     """
-    # This is a simplified version. The full implementation would be more complex.
-    return process_material_video(video_path) # For now, treat it the same as a material video
+    return process_material_video(video_path)
